@@ -61,6 +61,7 @@ class Graded:
 class QueryOptions:
     mode: str = "auto"  # auto | fast | standard | deep
     session_id: str | None = None
+    user_id: str | None = None  # owner of the trace / deep job
     principals: set[str] | None = None
     staged_docs: frozenset[str] = frozenset()
     is_eval: bool = False
@@ -209,7 +210,10 @@ class QueryEngine:
             route = "deep"
         else:
             kb_tokens = self._kb_tokens()
-            if 0 < kb_tokens <= self.cfg.long_context_max_tokens and not opts.staged_docs:
+            # only read the whole KB when it fits comfortably in the answer model's window
+            # (small local models have far smaller windows than cloud models)
+            limit = min(self.cfg.long_context_max_tokens, int(self.reg.context_tokens("generator") * 0.6))
+            if 0 < kb_tokens <= limit and not opts.staged_docs:
                 route = "long_context"
             else:
                 route = "fast" if gate["complexity"] == "simple" else "standard"
@@ -225,6 +229,7 @@ class QueryEngine:
     def _start_deep(self, query: str, opts: QueryOptions) -> str:
         job = Job(
             kb_id=self.kb_id,
+            user_id=opts.user_id,
             kind="deep",
             input={"query": query, "session_id": opts.session_id, "principals": sorted(opts.principals or [])},
         )
@@ -788,6 +793,7 @@ class QueryEngine:
         trace = Trace(
             kb_id=self.kb_id,
             session_id=opts.session_id,
+            user_id=opts.user_id,
             query=query,
             query_cluster_id=cluster,
             route=route,

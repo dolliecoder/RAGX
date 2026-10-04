@@ -42,7 +42,7 @@ def run_deep(job_id: str) -> dict[str, Any]:
     with session_scope() as s:
         job = s.get(Job, job_id)
         assert job is not None
-        kb_id, inp = job.kb_id, dict(job.input)
+        kb_id, inp, owner = job.kb_id, dict(job.input), job.user_id
     state = load_state(job_id)
     query = inp["query"]
     principals = set(inp.get("principals") or []) or None
@@ -110,7 +110,15 @@ def run_deep(job_id: str) -> dict[str, Any]:
         # ------------------------------------------------------ 4. synthesis
         with session_scope() as s:
             eng = QueryEngine(s, kb_id, cfg, version)
-            opts = QueryOptions(mode="deep", persist=True, allow_escalation=False, meter=meter, principals=principals, session_id=inp.get("session_id"))
+            opts = QueryOptions(
+                mode="deep",
+                persist=True,
+                allow_escalation=False,
+                meter=meter,
+                principals=principals,
+                session_id=inp.get("session_id"),
+                user_id=owner,
+            )
             retr = eng._engine(opts)
             subqs = [SubQuery(q, identifiers=identifiers(q)) for q in plan]
             graded: list[Graded] = []

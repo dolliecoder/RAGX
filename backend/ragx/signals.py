@@ -76,6 +76,7 @@ def record_feedback(
     rating: int = 0,
     comment: str = "",
     correction: str = "",
+    trusted: bool = True,
 ) -> Feedback:
     if kind not in WEIGHTS:
         raise ValueError(f"unknown feedback kind {kind}")
@@ -89,8 +90,11 @@ def record_feedback(
         trace.negative_signal = True
         trace.diagnosed = False  # re-open for the Repair loop
     if correction.strip() and rating < 0:
+        # untrusted (student) corrections wait for admin review before they gate fixes
         session.add(
-            GoldenItem(kb_id=trace.kb_id, question=trace.query, expected_answer=correction.strip(), origin="feedback")
+            GoldenItem(
+                kb_id=trace.kb_id, question=trace.query, expected_answer=correction.strip(), origin="feedback", active=trusted
+            )
         )
     return fb
 

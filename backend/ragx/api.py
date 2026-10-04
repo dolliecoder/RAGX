@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
-import hmac
 import logging
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 
 from . import __version__
+from . import limits as usage_limits
+from .auth import AuthError, Principal
 from .bootstrap import init_app
 from .config import RuntimeConfig, get_settings
 from .control import activate, active_config, audit, canary_version, create_version, rollback_version, select_config
@@ -38,10 +40,12 @@ from .models import (
     KnowledgeBase,
     Source,
     Trace,
+    User,
 )
 from .reflex.engine import QueryEngine, QueryOptions
 from .signals import record_feedback
 from .tasks import Scheduler
+from .api_accounts import router as accounts_router
 
 log = logging.getLogger("ragx.api")
 _scheduler: Scheduler | None = None
@@ -62,6 +66,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="RAGX", version=__version__, lifespan=lifespan)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in get_settings().cors_origins.split(",") if o.strip()],
@@ -70,13 +75,24 @@ app.add_middleware(
 )
 
 
-def require_key(x_api_key: str | None = Header(default=None)) -> None:
-    key = get_settings().api_key
-    if key and not (x_api_key and hmac.compare_digest(x_api_key, key)):
-        raise HTTPException(401, "invalid or missing X-API-Key")
+app.include_router(accounts_router)
 
 
-api = Depends(require_key)
+@app.exception_handler(AuthError)
+async def _auth_error(_request: Request, exc: AuthError):
+    return JSONResponse({"detail": str(exc)}, status_code=exc.status)
+
+
+@app.exception_handler(usage_limits.LimitError)
+async def _limit_error(_request: Request, exc: usage_limits.LimitError):
+    return JSONResponse(
+        {"detail": str(exc), "limit": exc.kind, "retry_after": exc.retry_after},
+        status_code=429,
+        headers={"Retry-After": str(exc.retry_after)},
+    )
+
+
+from .deps import api, signed_in  # noqa: E402  (shared auth dependencies)
 
 
 def _dt(v):
@@ -104,15 +120,31 @@ def providers() -> dict[str, Any]:
     return st
 
 
+@app.get("/api/providers/models", dependencies=[api])
+def provider_models(provider: str = Query(..., pattern="^(ollama|gemini|groq|openrouter)$")) -> list[dict[str, Any]]:
+    from .llm.catalog import CatalogError, list_models
+
+    try:
+        return list_models(provider, get_settings())
+    except CatalogError as e:
+        raise HTTPException(409, str(e)) from e
+
+
 # ---------------------------------------------------------- knowledge bases
 class KBIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = ""
+    visibility: Literal["all", "admins"] = "all"
 
 
-def _kb(s, kb_id: str) -> KnowledgeBase:
+class KBPatch(BaseModel):
+    description: str | None = None
+    visibility: Literal["all", "admins"] | None = None
+
+
+def _kb(s, kb_id: str, p: Principal | None = None) -> KnowledgeBase:
     kb = s.get(KnowledgeBase, kb_id) or s.scalar(select(KnowledgeBase).where(KnowledgeBase.name == kb_id))
-    if kb is None:
+    if kb is None or (p is not None and not p.is_admin and kb.visibility != "all"):
         _404("knowledge base")
     return kb
 
@@ -120,39 +152,62 @@ def _kb(s, kb_id: str) -> KnowledgeBase:
 def _kb_out(s, kb: KnowledgeBase) -> dict[str, Any]:
     docs = s.scalar(select(func.count()).select_from(Document).where(Document.kb_id == kb.id)) or 0
     tokens = s.scalar(select(func.coalesce(func.sum(Chunk.token_count), 0)).where(Chunk.kb_id == kb.id, Chunk.status == "active")) or 0
-    return {"id": kb.id, "name": kb.name, "description": kb.description, "documents": docs, "tokens": int(tokens), "created_at": _dt(kb.created_at)}
+    return {
+        "id": kb.id,
+        "name": kb.name,
+        "description": kb.description,
+        "visibility": kb.visibility,
+        "documents": docs,
+        "tokens": int(tokens),
+        "created_at": _dt(kb.created_at),
+    }
 
 
-@app.get("/api/kbs", dependencies=[api])
-def list_kbs() -> list[dict[str, Any]]:
+@app.get("/api/kbs")
+def list_kbs(p: Principal = signed_in) -> list[dict[str, Any]]:
     with session_scope() as s:
-        return [_kb_out(s, kb) for kb in s.scalars(select(KnowledgeBase).order_by(KnowledgeBase.created_at))]
+        q = select(KnowledgeBase).order_by(KnowledgeBase.created_at)
+        if not p.is_admin:
+            q = q.where(KnowledgeBase.visibility == "all")
+        return [_kb_out(s, kb) for kb in s.scalars(q)]
 
 
-@app.post("/api/kbs", dependencies=[api], status_code=201)
-def create_kb(body: KBIn) -> dict[str, Any]:
+@app.post("/api/kbs", status_code=201)
+def create_kb(body: KBIn, p: Principal = api) -> dict[str, Any]:
     with session_scope() as s:
         if s.scalar(select(KnowledgeBase).where(KnowledgeBase.name == body.name)):
             raise HTTPException(409, "a knowledge base with this name exists")
-        kb = KnowledgeBase(name=body.name, description=body.description)
+        kb = KnowledgeBase(name=body.name, description=body.description, visibility=body.visibility)
         s.add(kb)
         s.flush()
-        audit(s, "user", "kb.create", kb.id, name=body.name)
+        audit(s, p.email, "kb.create", kb.id, name=body.name)
         return _kb_out(s, kb)
 
 
-@app.get("/api/kbs/{kb_id}", dependencies=[api])
-def get_kb(kb_id: str) -> dict[str, Any]:
+@app.get("/api/kbs/{kb_id}")
+def get_kb(kb_id: str, p: Principal = signed_in) -> dict[str, Any]:
     with session_scope() as s:
-        return _kb_out(s, _kb(s, kb_id))
+        return _kb_out(s, _kb(s, kb_id, p))
 
 
-@app.delete("/api/kbs/{kb_id}", dependencies=[api])
-def delete_kb(kb_id: str) -> dict[str, Any]:
+@app.patch("/api/kbs/{kb_id}")
+def patch_kb(kb_id: str, body: KBPatch, p: Principal = api) -> dict[str, Any]:
+    with session_scope() as s:
+        kb = _kb(s, kb_id)
+        if body.description is not None:
+            kb.description = body.description
+        if body.visibility is not None:
+            kb.visibility = body.visibility
+        audit(s, p.email, "kb.update", kb.id, **body.model_dump(exclude_none=True))
+        return _kb_out(s, kb)
+
+
+@app.delete("/api/kbs/{kb_id}")
+def delete_kb(kb_id: str, p: Principal = api) -> dict[str, Any]:
     with session_scope() as s:
         kb = _kb(s, kb_id)
         s.delete(kb)
-        audit(s, "user", "kb.delete", kb.id, name=kb.name)
+        audit(s, p.email, "kb.delete", kb.id, name=kb.name)
     return {"deleted": True}
 
 
@@ -184,28 +239,28 @@ def list_sources(kb_id: str) -> list[dict[str, Any]]:
         return [_source_out(x) for x in s.scalars(select(Source).where(Source.kb_id == kb.id))]
 
 
-@app.post("/api/kbs/{kb_id}/sources", dependencies=[api], status_code=201)
-def add_source(kb_id: str, body: SourceIn) -> dict[str, Any]:
+@app.post("/api/kbs/{kb_id}/sources", status_code=201)
+def add_source(kb_id: str, body: SourceIn, p: Principal = api) -> dict[str, Any]:
     st = get_settings()
     uri = body.uri.strip()
     if body.kind == "url":
         if not re.match(r"^https?://", uri):
             raise HTTPException(422, "url sources must start with http:// or https://")
     else:
-        p = Path(uri).expanduser()
-        if not p.exists():
+        path = Path(uri).expanduser()
+        if not path.exists():
             raise HTTPException(422, f"path does not exist on the server: {uri}")
         roots = [Path(r.strip()) for r in st.source_roots.split(",") if r.strip()]
-        if roots and not is_safe_local_path(str(p), roots):
+        if roots and not is_safe_local_path(str(path), roots):
             raise HTTPException(403, "path is outside RAGX_SOURCE_ROOTS")
-        uri = str(p.resolve())
+        uri = str(path.resolve())
     with session_scope() as s:
         kb = _kb(s, kb_id)
         src = Source(kb_id=kb.id, kind=body.kind, uri=uri, recursive=body.recursive, authority=body.authority)
         s.add(src)
         s.flush()
         job = create_job(s, "crawl", kb.id, {"source_id": src.id, "force": True})
-        audit(s, "user", "source.add", src.id, kind=body.kind, uri=uri)
+        audit(s, p.email, "source.add", src.id, kind=body.kind, uri=uri)
         return {**_source_out(src), "job_id": job.id}
 
 
@@ -217,22 +272,22 @@ def crawl(source_id: str, force: bool = False) -> dict[str, Any]:
         return {"job_id": job.id}
 
 
-@app.delete("/api/sources/{source_id}", dependencies=[api])
-def delete_source(source_id: str) -> dict[str, Any]:
+@app.delete("/api/sources/{source_id}")
+def delete_source(source_id: str, p: Principal = api) -> dict[str, Any]:
     with session_scope() as s:
         src = s.get(Source, source_id) or _404("source")
         for d in s.scalars(select(Document).where(Document.source_id == src.id)):
             s.delete(d)
         s.delete(src)
-        audit(s, "user", "source.delete", source_id)
+        audit(s, p.email, "source.delete", source_id)
     return {"deleted": True}
 
 
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._\- ]+")
 
 
-@app.post("/api/kbs/{kb_id}/upload", dependencies=[api], status_code=201)
-async def upload(kb_id: str, files: list[UploadFile] = File(...)) -> dict[str, Any]:
+@app.post("/api/kbs/{kb_id}/upload", status_code=201)
+async def upload(kb_id: str, files: list[UploadFile] = File(...), p: Principal = api) -> dict[str, Any]:
     st = get_settings()
     with session_scope() as s:
         kb = _kb(s, kb_id)
@@ -258,7 +313,7 @@ async def upload(kb_id: str, files: list[UploadFile] = File(...)) -> dict[str, A
             s.add(src)
             s.flush()
         job = create_job(s, "crawl", kb_real, {"source_id": src.id, "force": False}) if saved else None
-        audit(s, "user", "upload", kb_real, files=saved)
+        audit(s, p.email, "upload", kb_real, files=saved)
         return {"saved": saved, "rejected": rejected, "job_id": job.id if job else None, "source_id": src.id}
 
 
@@ -326,8 +381,8 @@ class DocAction(BaseModel):
     authority: float | None = Field(default=None, ge=0.1, le=2.0)
 
 
-@app.post("/api/documents/{doc_id}/{action}", dependencies=[api])
-def document_action(doc_id: str, action: Literal["quarantine", "unquarantine", "reingest", "update"], body: DocAction | None = None) -> dict[str, Any]:
+@app.post("/api/documents/{doc_id}/{action}")
+def document_action(doc_id: str, action: Literal["quarantine", "unquarantine", "reingest", "update"], body: DocAction | None = None, p: Principal = api) -> dict[str, Any]:
     with session_scope() as s:
         d = s.get(Document, doc_id) or _404("document")
         if action == "quarantine":
@@ -339,14 +394,14 @@ def document_action(doc_id: str, action: Literal["quarantine", "unquarantine", "
                 res = reingest_document(s, d)
             except FileNotFoundError as e:
                 raise HTTPException(409, str(e)) from e
-            audit(s, "user", "document.reingest", doc_id, result=res.status)
+            audit(s, p.email, "document.reingest", doc_id, result=res.status)
             return {"status": res.status, "chunks": res.chunks, "notes": res.notes}
         elif action == "update" and body is not None:
             if body.tier:
                 d.tier = body.tier
             if body.authority is not None:
                 d.authority = body.authority
-        audit(s, "user", f"document.{action}", doc_id)
+        audit(s, p.email, f"document.{action}", doc_id)
         return _doc_out(d)
 
 
@@ -358,16 +413,30 @@ class QueryIn(BaseModel):
     principals: list[str] = Field(default_factory=list)
 
 
-@app.post("/api/kbs/{kb_id}/query", dependencies=[api])
-def query(kb_id: str, body: QueryIn) -> dict[str, Any]:
+@app.post("/api/kbs/{kb_id}/query")
+def query(kb_id: str, body: QueryIn, p: Principal = signed_in) -> dict[str, Any]:
     with session_scope() as s:
-        kb = _kb(s, kb_id)
-        version, cfg = select_config(s)
-        eng = QueryEngine(s, kb.id, cfg, version)
-        return eng.answer(
-            body.query,
-            QueryOptions(mode=body.mode, session_id=body.session_id, principals=set(body.principals) or None),
-        )
+        kb = _kb(s, kb_id, p)
+        with usage_limits.reserve(s, p, deep=body.mode == "deep") as can_go_deep:
+            version, cfg = select_config(s)
+            eng = QueryEngine(s, kb.id, cfg, version)
+            result = eng.answer(
+                body.query,
+                QueryOptions(
+                    mode=body.mode,
+                    session_id=body.session_id,
+                    user_id=p.user_id,
+                    # document ACL groups can only be asserted by admins / automation
+                    principals=(set(body.principals) or None) if p.is_admin else None,
+                    allow_escalation=can_go_deep,
+                ),
+            )
+            usage_limits.record(s, p.user_id, result)
+        if p.user_id:
+            user = s.get(User, p.user_id)
+            if user is not None:
+                result["usage"] = usage_limits.usage_summary(s, user)
+        return result
 
 
 # -------------------------------------------------------------------- jobs
@@ -375,6 +444,7 @@ def _job_out(j: Job) -> dict[str, Any]:
     return {
         "id": j.id,
         "kb_id": j.kb_id,
+        "user_id": j.user_id,
         "kind": j.kind,
         "status": j.status,
         "input": j.input,
@@ -387,19 +457,24 @@ def _job_out(j: Job) -> dict[str, Any]:
     }
 
 
-@app.get("/api/jobs", dependencies=[api])
-def list_jobs(kb_id: str | None = None, limit: int = Query(50, le=500)) -> list[dict[str, Any]]:
+@app.get("/api/jobs")
+def list_jobs(kb_id: str | None = None, limit: int = Query(50, le=500), p: Principal = signed_in) -> list[dict[str, Any]]:
     with session_scope() as s:
         q = select(Job).order_by(Job.created_at.desc()).limit(limit)
         if kb_id:
-            q = q.where(Job.kb_id == _kb(s, kb_id).id)
+            q = q.where(Job.kb_id == _kb(s, kb_id, p).id)
+        if not p.is_admin:
+            q = q.where(Job.user_id == p.user_id)
         return [_job_out(j) for j in s.scalars(q)]
 
 
-@app.get("/api/jobs/{job_id}", dependencies=[api])
-def get_job(job_id: str) -> dict[str, Any]:
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str, p: Principal = signed_in) -> dict[str, Any]:
     with session_scope() as s:
-        return _job_out(s.get(Job, job_id) or _404("job"))
+        j = s.get(Job, job_id)
+        if j is None or (not p.is_admin and j.user_id != p.user_id):
+            _404("job")
+        return _job_out(j)
 
 
 # ------------------------------------------------------------------ traces
@@ -420,22 +495,30 @@ def _trace_brief(t: Trace) -> dict[str, Any]:
         "config_version": t.config_version,
         "is_eval": t.is_eval,
         "session_id": t.session_id,
+        "user_id": t.user_id,
         "created_at": _dt(t.created_at),
     }
 
 
-@app.get("/api/kbs/{kb_id}/traces", dependencies=[api])
+@app.get("/api/kbs/{kb_id}/traces")
 def list_traces(
     kb_id: str,
     status: str | None = None,
     include_eval: bool = False,
     healed: bool | None = None,
+    user_id: str | None = None,
     limit: int = Query(50, le=500),
     offset: int = 0,
+    p: Principal = signed_in,
 ) -> dict[str, Any]:
     with session_scope() as s:
-        kb = _kb(s, kb_id)
+        kb = _kb(s, kb_id, p)
         q = select(Trace).where(Trace.kb_id == kb.id)
+        if not p.is_admin:  # students only ever see their own questions
+            q = q.where(Trace.user_id == p.user_id)
+            include_eval = False
+        elif user_id:
+            q = q.where(Trace.user_id == user_id)
         if not include_eval:
             q = q.where(Trace.is_eval.is_(False))
         if status:
@@ -444,13 +527,31 @@ def list_traces(
             q = q.where(Trace.healed.is_(healed))
         total = s.scalar(select(func.count()).select_from(q.subquery()))
         rows = s.scalars(q.order_by(Trace.created_at.desc()).offset(offset).limit(limit)).all()
-        return {"total": total, "items": [_trace_brief(t) for t in rows]}
+        items = [_trace_brief(t) for t in rows]
+        if p.is_admin:
+            emails = _emails(s, {t.user_id for t in rows if t.user_id})
+            for it in items:
+                it["user_email"] = emails.get(it["user_id"])
+        return {"total": total, "items": items}
 
 
-@app.get("/api/traces/{trace_id}", dependencies=[api])
-def get_trace(trace_id: str) -> dict[str, Any]:
+def _emails(s, ids: set[str]) -> dict[str, str]:
+    if not ids:
+        return {}
+    return dict(s.execute(select(User.id, User.email).where(User.id.in_(ids))).all())
+
+
+def _own_trace(s, trace_id: str, p: Principal) -> Trace:
+    t = s.get(Trace, trace_id)
+    if t is None or (not p.is_admin and t.user_id != p.user_id):
+        _404("trace")
+    return t
+
+
+@app.get("/api/traces/{trace_id}")
+def get_trace(trace_id: str, p: Principal = signed_in) -> dict[str, Any]:
     with session_scope() as s:
-        t = s.get(Trace, trace_id) or _404("trace")
+        t = _own_trace(s, trace_id, p)
         fb = s.scalars(select(Feedback).where(Feedback.trace_id == t.id).order_by(Feedback.created_at)).all()
         return {
             **_trace_brief(t),
@@ -460,6 +561,7 @@ def get_trace(trace_id: str) -> dict[str, Any]:
             "tokens_out": t.tokens_out,
             "data": t.data,
             "feedback": [{"kind": f.kind, "rating": f.rating, "comment": f.comment, "correction": f.correction, "created_at": _dt(f.created_at)} for f in fb],
+            "user_email": _emails(s, {t.user_id}).get(t.user_id) if p.is_admin and t.user_id else None,
         }
 
 
@@ -470,11 +572,14 @@ class FeedbackIn(BaseModel):
     correction: str = Field(default="", max_length=8000)
 
 
-@app.post("/api/traces/{trace_id}/feedback", dependencies=[api])
-def feedback(trace_id: str, body: FeedbackIn) -> dict[str, Any]:
+@app.post("/api/traces/{trace_id}/feedback")
+def feedback(trace_id: str, body: FeedbackIn, p: Principal = signed_in) -> dict[str, Any]:
     with session_scope() as s:
-        t = s.get(Trace, trace_id) or _404("trace")
-        record_feedback(s, t, kind=body.kind, rating=body.rating, comment=body.comment, correction=body.correction)
+        t = _own_trace(s, trace_id, p)
+        # student corrections become golden tests only after an admin reviews them
+        record_feedback(
+            s, t, kind=body.kind, rating=body.rating, comment=body.comment, correction=body.correction, trusted=p.is_admin
+        )
         return {"ok": True}
 
 
@@ -523,12 +628,12 @@ class DiagnosisUpdate(BaseModel):
     status: Literal["open", "wont_fix", "fixed", "needs_human"]
 
 
-@app.patch("/api/diagnoses/{diag_id}", dependencies=[api])
-def update_diagnosis(diag_id: str, body: DiagnosisUpdate) -> dict[str, Any]:
+@app.patch("/api/diagnoses/{diag_id}")
+def update_diagnosis(diag_id: str, body: DiagnosisUpdate, p: Principal = api) -> dict[str, Any]:
     with session_scope() as s:
         d = s.get(Diagnosis, diag_id) or _404("diagnosis")
         d.status = body.status
-        audit(s, "user", "diagnosis.update", diag_id, status=body.status)
+        audit(s, p.email, "diagnosis.update", diag_id, status=body.status)
         return {"id": d.id, "status": d.status}
 
 
@@ -562,18 +667,18 @@ class ReasonIn(BaseModel):
     reason: str = Field(default="", max_length=2000)
 
 
-@app.post("/api/fixes/{fix_id}/{action}", dependencies=[api])
-def fix_action(fix_id: str, action: Literal["approve", "reject", "rollback", "evaluate"], body: ReasonIn | None = None) -> dict[str, Any]:
+@app.post("/api/fixes/{fix_id}/{action}")
+def fix_action(fix_id: str, action: Literal["approve", "reject", "rollback", "evaluate"], body: ReasonIn | None = None, p: Principal = api) -> dict[str, Any]:
     from .repair.service import approve_fix, process_fix, reject_fix, rollback_fix
 
     reason = body.reason if body else ""
     try:
         if action == "approve":
-            return approve_fix(fix_id)
+            return approve_fix(fix_id, actor=p.email)
         if action == "reject":
-            return reject_fix(fix_id, reason=reason)
+            return reject_fix(fix_id, actor=p.email, reason=reason)
         if action == "rollback":
-            return rollback_fix(fix_id, reason=reason)
+            return rollback_fix(fix_id, actor=p.email, reason=reason)
         with session_scope() as s:
             f = s.get(Fix, fix_id) or _404("fix")
             if f.status in ("rejected", "failed"):
@@ -625,8 +730,8 @@ class ConfigIn(BaseModel):
     note: str = Field(default="manual edit", max_length=500)
 
 
-@app.put("/api/config", dependencies=[api])
-def put_config(body: ConfigIn) -> dict[str, Any]:
+@app.put("/api/config")
+def put_config(body: ConfigIn, p: Principal = api) -> dict[str, Any]:
     try:
         cfg = RuntimeConfig.model_validate(body.data)
     except ValueError as e:
@@ -634,7 +739,7 @@ def put_config(body: ConfigIn) -> dict[str, Any]:
     with session_scope() as s:
         version, _ = active_config(s)
         cv = create_version(s, cfg, status="candidate", parent=version, note=body.note)
-        activate(s, cv.version, "user", note=body.note)
+        activate(s, cv.version, p.email, note=body.note)
         return {"active_version": cv.version}
 
 
@@ -645,14 +750,14 @@ def get_config_version(version: int) -> dict[str, Any]:
         return {**_cv_out(cv), "data": cv.data}
 
 
-@app.post("/api/config/{version}/{action}", dependencies=[api])
-def config_action(version: int, action: Literal["activate", "rollback"], body: ReasonIn | None = None) -> dict[str, Any]:
+@app.post("/api/config/{version}/{action}")
+def config_action(version: int, action: Literal["activate", "rollback"], body: ReasonIn | None = None, p: Principal = api) -> dict[str, Any]:
     with session_scope() as s:
         try:
             if action == "activate":
-                activate(s, version, "user", note=body.reason if body else "")
+                activate(s, version, p.email, note=body.reason if body else "")
             else:
-                rollback_version(s, version, "user", body.reason if body else "manual rollback")
+                rollback_version(s, version, p.email, body.reason if body else "manual rollback")
         except KeyError as e:
             raise HTTPException(404, str(e)) from e
         v, _ = active_config(s)
