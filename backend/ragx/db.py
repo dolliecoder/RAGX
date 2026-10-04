@@ -93,6 +93,36 @@ def init_db() -> None:
         with engine.begin() as conn:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     Base.metadata.create_all(engine)
+    _add_missing_columns(engine)
+
+
+def _add_missing_columns(engine: Engine) -> None:
+    """Forward-only migration: add columns introduced after a table was created.
+
+    Only additive changes are handled (new nullable columns or columns with a scalar
+    default); existing data is never modified or dropped."""
+    from sqlalchemy import inspect
+
+    insp = inspect(engine)
+    existing_tables = set(insp.get_table_names())
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            have = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in have:
+                    continue
+                coltype = col.type.compile(dialect=engine.dialect)
+                ddl = f'ALTER TABLE {table.name} ADD COLUMN "{col.name}" {coltype}'
+                default = getattr(col.default, "arg", None)
+                if isinstance(default, bool):
+                    ddl += f" DEFAULT {'TRUE' if default else 'FALSE'}" if engine.dialect.name == "postgresql" else f" DEFAULT {int(default)}"
+                elif isinstance(default, (int, float)):
+                    ddl += f" DEFAULT {default}"
+                elif isinstance(default, str):
+                    ddl += " DEFAULT '" + default.replace("'", "''") + "'"
+                conn.execute(text(ddl))
 
 
 @contextmanager

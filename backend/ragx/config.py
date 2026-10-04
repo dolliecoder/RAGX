@@ -21,30 +21,45 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///./ragx.db"
     data_dir: Path = Path("./data")
-    api_key: str | None = None  # if set, required as X-API-Key on every request
+    # Service key for automation/CLI: X-API-Key with this value acts as an admin.
+    # Browsers never get it; people sign in with accounts.
+    api_key: str | None = None
+    # Comma-separated emails that are made admins when they sign up or log in.
+    admin_emails: str = ""
+    # Session cookie: set Secure when served over HTTPS (deployment).
+    cookie_secure: bool = False
+    session_days: int = 30
     # Comma-separated roots that file/directory sources must live under.
     # Empty = unrestricted (single-user local mode); Docker sets /docs,/app/data.
     source_roots: str = ""
     cors_origins: str = "http://localhost:3000"
 
-    # Role -> "provider:model". Providers: anthropic, openai, gemini, fake.
-    generator: str = "anthropic:claude-opus-5-5"
-    verifier: str = "gemini:gemini-3.5-flash"
-    utility: str = "anthropic:claude-haiku-4-5"  # gate, planner, grader, contextualizer
+    # Role -> "provider:model".
+    # Free providers: gemini (free tier key), groq (free key), openrouter (":free" models),
+    # ollama (local open-source models, no key). Paid: anthropic, openai. Offline: fake.
+    # Defaults are free; without any key or local model RAGX runs in offline mode.
+    generator: str = "gemini:gemini-3.5-flash-lite"
+    verifier: str = "gemini:gemini-3.1-flash-lite"  # a different model checks the answers
+    utility: str = "gemini:gemini-3.5-flash-lite"  # gate, planner, grader, contextualizer
     judge: str = ""  # eval judge; defaults to verifier
     # Optional fallback chains, comma separated "provider:model" entries.
     generator_fallbacks: str = ""
     verifier_fallbacks: str = ""
     utility_fallbacks: str = ""
 
-    # Embeddings: openai, gemini, voyage, hash (local, offline).
-    embedder: str = "hash:hash-512"
-    # Reranker: cohere, voyage, llm, lexical.
+    # Embeddings: gemini, ollama, openai, voyage, hash (built-in, offline).
+    embedder: str = "gemini:gemini-embedding-001"
+    # Reranker: llm (uses the utility model), lexical (built-in), cohere, voyage.
     reranker: str = "llm:utility"
 
+    gemini_api_key: str | None = None
+    groq_api_key: str | None = None
+    openrouter_api_key: str | None = None
+    ollama_url: str = "http://localhost:11434"
+    ollama_num_ctx: int = 16384  # context window given to local models
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None
-    gemini_api_key: str | None = None
+    openai_base_url: str = "https://api.openai.com/v1"  # also LM Studio / vLLM
     voyage_api_key: str | None = None
     cohere_api_key: str | None = None
 
@@ -119,6 +134,34 @@ class RuntimeConfig(BaseModel):
 
     def budget(self, tier: str) -> TierBudget:
         return self.fast if tier == "fast" else self.standard
+
+
+class PlanLimits(BaseModel):
+    daily_questions: int = 30  # 0 = unlimited
+    per_minute: int = 5
+    deep_per_day: int = 2
+    max_concurrent: int = 2
+
+
+class AccessPolicy(BaseModel):
+    """Who may sign up and how much they may use. Stored separately from
+    RuntimeConfig so that config rollbacks never change access rules."""
+
+    signup_enabled: bool = True
+    allowed_email_domains: list[str] = Field(default_factory=list)  # empty = any domain
+    join_code: str = ""  # empty = not required
+    default_plan: str = "free"
+    plans: dict[str, PlanLimits] = Field(
+        default_factory=lambda: {
+            "free": PlanLimits(),
+            "pro": PlanLimits(daily_questions=300, per_minute=15, deep_per_day=20, max_concurrent=4),
+        }
+    )
+    # Whole-site daily cap protecting a shared (e.g. free-tier) model quota. 0 = none.
+    global_daily_questions: int = 0
+
+    def limits_for(self, plan: str) -> PlanLimits:
+        return self.plans.get(plan) or self.plans.get(self.default_plan) or PlanLimits()
 
 
 @lru_cache

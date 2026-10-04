@@ -18,11 +18,61 @@ def _created() -> Mapped[datetime]:
     return mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[str] = _id()
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)  # stored lowercase
+    name: Mapped[str] = mapped_column(String(200), default="")
+    password_hash: Mapped[str] = mapped_column(String(300))
+    role: Mapped[str] = mapped_column(String(20), default="user")  # user | admin
+    plan: Mapped[str] = mapped_column(String(40), default="free")
+    daily_limit_override: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = _created()
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AuthSession(Base):
+    """Server-side session; only the SHA-256 of the token is stored."""
+
+    __tablename__ = "auth_sessions"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)  # sha256(token)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = _created()
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    user_agent: Mapped[str] = mapped_column(String(300), default="")
+
+
+class UsageDay(Base):
+    __tablename__ = "usage_days"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    day: Mapped[str] = mapped_column(String(10), primary_key=True)  # YYYY-MM-DD (UTC)
+    questions: Mapped[int] = mapped_column(Integer, default=0)
+    deep: Mapped[int] = mapped_column(Integer, default=0)
+    tokens_in: Mapped[int] = mapped_column(Integer, default=0)
+    tokens_out: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class AppSetting(Base):
+    """Small key/value store for non-versioned settings (e.g. the access policy)."""
+
+    __tablename__ = "app_settings"
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    data: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class KnowledgeBase(Base):
     __tablename__ = "knowledge_bases"
     id: Mapped[str] = _id()
     name: Mapped[str] = mapped_column(String(200), unique=True)
     description: Mapped[str] = mapped_column(Text, default="")
+    # all = every signed-in user can ask it; admins = admins only (drafts, staff docs)
+    visibility: Mapped[str] = mapped_column(String(20), default="all")
     created_at: Mapped[datetime] = _created()
 
 
@@ -117,6 +167,7 @@ class Trace(Base):
     id: Mapped[str] = _id()
     kb_id: Mapped[str] = mapped_column(ForeignKey("knowledge_bases.id", ondelete="CASCADE"), index=True)
     session_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    user_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     query: Mapped[str] = mapped_column(Text)
     query_cluster_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     route: Mapped[str] = mapped_column(String(20))  # direct | long_context | fast | standard | deep
@@ -238,6 +289,7 @@ class Job(Base):
     __tablename__ = "jobs"
     id: Mapped[str] = _id()
     kb_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    user_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     kind: Mapped[str] = mapped_column(String(30))  # deep | ingest | repair | eval | crawl
     # queued | running | done | failed
     status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
