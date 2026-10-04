@@ -49,8 +49,11 @@ def contextualize_chunks(parsed: ParsedDoc, drafts: list[ChunkDraft]) -> list[tu
     context when the model is unavailable so ingestion never blocks on an LLM."""
     reg = get_registry()
     document = parsed.text
-    if len(document) > MAX_CONTEXT_DOC_CHARS:
-        document = document[:MAX_CONTEXT_DOC_CHARS] + "\n[... document truncated ...]"
+    # ~4 characters per token; leave room for the chunk, instructions and the reply
+    # (small local models have far smaller windows than cloud models)
+    max_chars = min(MAX_CONTEXT_DOC_CHARS, int(reg.context_tokens("utility") * 4 * 0.6))
+    if len(document) > max_chars:
+        document = document[:max_chars] + "\n[... document truncated ...]"
 
     def one(d: ChunkDraft) -> tuple[str, list[str], bool]:
         try:

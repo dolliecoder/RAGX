@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import re
 import time
 from typing import Any
 
@@ -47,6 +48,7 @@ class AnthropicProvider:
 
     def __init__(self, model: str, api_key: str, timeout: float):
         self.model = model
+        self.max_context = 200_000 if "haiku" in model else 1_000_000
         self.client = anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=2)
 
     def _supports_effort(self) -> bool:
@@ -120,6 +122,7 @@ class AnthropicProvider:
 
 class OpenAIProvider:
     name = "openai"
+    max_context = 128_000
 
     def __init__(self, model: str, api_key: str, timeout: float, base_url: str = "https://api.openai.com/v1"):
         self.model = model
@@ -154,8 +157,154 @@ class OpenAIProvider:
         )
 
 
+_THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_thinking(text: str) -> str:
+    """Open reasoning models (Qwen3, DeepSeek-R1 ...) may prefix their answer with a
+    <think> block that can itself contain braces; drop it before JSON parsing."""
+    return _THINK.sub("", text).strip()
+
+
+_THINKING_FAMILIES = ("qwen3", "deepseek-r1", "magistral", "phi4-reasoning")
+
+
+class OllamaProvider:
+    """Local open-source models served by Ollama (free, private, no API key).
+
+    Uses Ollama's native chat API so the context window (num_ctx) and a JSON schema
+    for structured output can be set; the OpenAI-compatible endpoint allows neither.
+    """
+
+    name = "ollama"
+
+    def __init__(self, model: str, base_url: str, timeout: float, num_ctx: int):
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.num_ctx = num_ctx
+        self.max_context = num_ctx
+        self.http = httpx.Client(timeout=max(timeout, 300.0))  # CPU inference is slow
+
+    def complete(self, req: LLMRequest) -> LLMResponse:
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": req.system},
+                {"role": "user", "content": req.user},
+            ],
+            "stream": False,
+            "options": {"num_ctx": self.num_ctx, "temperature": 0, "num_predict": max(req.max_tokens, 1024) * 2},
+        }
+        if req.schema:
+            body["format"] = req.schema  # grammar-constrained JSON: reliable even on small models
+        # Reasoning models (Qwen3, DeepSeek-R1 ...) think at length by default, which is
+        # very slow on CPUs; the verifier catches mistakes, so skip it.
+        if self.model.split(":")[0].lower().startswith(_THINKING_FAMILIES):
+            body["think"] = False
+        url = f"{self.base_url}/api/chat"
+        try:
+            try:
+                data = _post_with_retries(self.http, url, json_body=body, headers={})
+            except ProviderError as e:
+                if "think" in body and not e.retryable and "think" in str(e).lower():
+                    body.pop("think")  # older Ollama or a model without the switch
+                    data = _post_with_retries(self.http, url, json_body=body, headers={})
+                else:
+                    raise
+        except ProviderError as e:
+            if "not found" in str(e).lower() and "model" in str(e).lower():
+                raise ProviderError(f"Ollama model '{self.model}' is not installed: run `ollama pull {self.model}`", retryable=False) from e
+            raise
+        if data.get("done_reason") == "length":
+            raise ProviderError("ollama response truncated (raise RAGX_OLLAMA_NUM_CTX or max tokens)", retryable=False)
+        text = _strip_thinking((data.get("message") or {}).get("content", ""))
+        return LLMResponse(
+            text=text,
+            provider=self.name,
+            model=self.model,
+            tokens_in=int(data.get("prompt_eval_count") or 0),
+            tokens_out=int(data.get("eval_count") or 0),
+        )
+
+
+class OpenAICompatProvider:
+    """Any OpenAI-compatible chat API: Groq and OpenRouter free tiers, LM Studio, vLLM.
+
+    JSON output degrades gracefully: json_schema -> json_object -> plain prompt, because
+    support differs by host and model.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        model: str,
+        base_url: str,
+        api_key: str | None,
+        timeout: float,
+        *,
+        max_context: int = 32_000,
+        json_schema: bool = False,
+        extra_headers: dict[str, str] | None = None,
+    ):
+        self.name = name
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.max_context = max_context
+        self.json_schema = json_schema
+        self.headers = {**({"Authorization": f"Bearer {api_key}"} if api_key else {}), **(extra_headers or {})}
+        self.http = httpx.Client(timeout=timeout)
+
+    def complete(self, req: LLMRequest) -> LLMResponse:
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": req.system},
+                {"role": "user", "content": req.user},
+            ],
+            "max_tokens": max(req.max_tokens, 1024) * 2,
+            "temperature": 0,
+        }
+        formats: list[dict[str, Any] | None] = [None]
+        if req.schema:
+            formats = [{"type": "json_object"}, None]
+            if self.json_schema:
+                formats.insert(0, {"type": "json_schema", "json_schema": {"name": req.task, "schema": req.schema, "strict": False}})
+        url = f"{self.base_url}/chat/completions"
+        last: ProviderError | None = None
+        for fmt in formats:
+            if fmt is None:
+                body.pop("response_format", None)
+            else:
+                body["response_format"] = fmt
+            try:
+                data = _post_with_retries(self.http, url, json_body=body, headers=self.headers)
+                break
+            except ProviderError as e:
+                last = e
+                if e.retryable or "HTTP 400" not in str(e) and "HTTP 422" not in str(e):
+                    raise
+        else:
+            assert last is not None
+            raise last
+        choices = data.get("choices") or []
+        if not choices:
+            raise ProviderError(f"{self.name} returned no choices: {str(data)[:200]}", retryable=False)
+        choice = choices[0]
+        if choice.get("finish_reason") == "length":
+            raise ProviderError(f"{self.name} response truncated", retryable=False)
+        usage = data.get("usage") or {}
+        return LLMResponse(
+            text=_strip_thinking((choice.get("message") or {}).get("content") or ""),
+            provider=self.name,
+            model=self.model,
+            tokens_in=int(usage.get("prompt_tokens") or 0),
+            tokens_out=int(usage.get("completion_tokens") or 0),
+        )
+
+
 class GeminiProvider:
     name = "gemini"
+    max_context = 1_000_000
 
     def __init__(self, model: str, api_key: str, timeout: float):
         self.model = model

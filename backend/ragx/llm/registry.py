@@ -15,7 +15,7 @@ from typing import Any
 
 from ..config import Settings, get_settings
 from .base import LLMProvider, LLMRequest, LLMResponse, ProviderError, current_meter, extract_json
-from .embeddings import Embedder, GeminiEmbedder, HashEmbedder, OpenAIEmbedder, VoyageEmbedder
+from .embeddings import Embedder, GeminiEmbedder, HashEmbedder, OllamaEmbedder, OpenAIEmbedder, VoyageEmbedder
 
 log = logging.getLogger("ragx.llm")
 
@@ -71,7 +71,34 @@ def _build_provider(spec: str, settings: Settings) -> tuple[LLMProvider | None, 
             return None, "RAGX_OPENAI_API_KEY not set"
         from .providers import OpenAIProvider
 
-        return OpenAIProvider(model, settings.openai_api_key, t), ""
+        return OpenAIProvider(model, settings.openai_api_key, t, base_url=settings.openai_base_url), ""
+    if provider == "ollama":
+        from .providers import OllamaProvider
+
+        return OllamaProvider(model, settings.ollama_url, t, settings.ollama_num_ctx), ""
+    if provider == "groq":
+        if not settings.groq_api_key:
+            return None, "RAGX_GROQ_API_KEY not set (free key at console.groq.com)"
+        from .providers import OpenAICompatProvider
+
+        return OpenAICompatProvider("groq", model, "https://api.groq.com/openai/v1", settings.groq_api_key, t, max_context=128_000), ""
+    if provider == "openrouter":
+        if not settings.openrouter_api_key:
+            return None, "RAGX_OPENROUTER_API_KEY not set (free key at openrouter.ai)"
+        from .providers import OpenAICompatProvider
+
+        return (
+            OpenAICompatProvider(
+                "openrouter",
+                model,
+                "https://openrouter.ai/api/v1",
+                settings.openrouter_api_key,
+                t,
+                max_context=32_000,
+                extra_headers={"X-Title": "RAGX"},
+            ),
+            "",
+        )
     if provider == "gemini":
         if not settings.gemini_api_key:
             return None, "RAGX_GEMINI_API_KEY not set"
@@ -177,6 +204,29 @@ class Registry:
                 br.fail("invalid JSON twice")
         raise ProviderError(f"all providers failed for role={role} task={req.task}: {' | '.join(errors)}")
 
+    def context_tokens(self, role: str) -> int:
+        """Smallest context window in the role's chain (fallbacks must fit too)."""
+        sizes = [int(getattr(p, "max_context", 1_000_000)) for p in self.chains[role]]
+        return min(sizes) if sizes else 1_000_000
+
+    def ollama_status(self) -> dict[str, Any] | None:
+        """Is the local Ollama server up, and are the configured models pulled?"""
+        wanted = [p.model for r in ROLES for p in self.chains[r] if p.name == "ollama"]
+        if self.settings.embedder.startswith("ollama:"):
+            wanted.append(self.settings.embedder.split(":", 1)[1] or "nomic-embed-text")
+        if not wanted:
+            return None
+        import httpx
+
+        try:
+            r = httpx.get(f"{self.settings.ollama_url.rstrip('/')}/api/tags", timeout=3)
+            have = {m["name"] for m in r.json().get("models", [])}
+        except (httpx.HTTPError, ValueError, KeyError):
+            return {"url": self.settings.ollama_url, "running": False, "missing": sorted(set(wanted))}
+        norm = {h.removesuffix(":latest") for h in have} | have
+        missing = sorted({w for w in wanted if w not in norm and w.removesuffix(":latest") not in norm})
+        return {"url": self.settings.ollama_url, "running": True, "missing": missing}
+
     def model_label(self, role: str) -> str:
         p = self.chains[role][0]
         return self._key(p)
@@ -197,6 +247,8 @@ class Registry:
                     emb = GeminiEmbedder(model or "gemini-embedding-001", s.gemini_api_key, s.request_timeout)
                 elif provider == "voyage" and s.voyage_api_key:
                     emb = VoyageEmbedder(model or "voyage-3.5", s.voyage_api_key, s.request_timeout)
+                elif provider == "ollama":
+                    emb = OllamaEmbedder(model or "nomic-embed-text", s.ollama_url, s.request_timeout)
                 elif provider != "hash":
                     self._embedder_note = f"embedder '{s.embedder}' missing credentials: using local hash embedder"
             except Exception as e:  # noqa: BLE001
@@ -227,6 +279,8 @@ class Registry:
         emb = self.embedder()
         return {
             "roles": roles,
+            "ollama": self.ollama_status(),
+            "context_tokens": {r: self.context_tokens(r) for r in ROLES},
             "verifier_independent": independent,
             "embedder": {"model": emb.model_id, "note": self._embedder_note},
             "reranker": getattr(self.reranker(), "label", "unknown"),

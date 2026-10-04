@@ -114,6 +114,34 @@ class GeminiEmbedder:
         return self._embed([text], "RETRIEVAL_QUERY")[0]
 
 
+class OllamaEmbedder:
+    """Local open-source embeddings (e.g. nomic-embed-text, bge-m3) via Ollama."""
+
+    def __init__(self, model: str, base_url: str, timeout: float):
+        self.model = model
+        self.model_id = f"ollama:{model}"
+        self.base_url = base_url.rstrip("/")
+        self.http = httpx.Client(timeout=max(timeout, 300.0))
+
+    def _embed(self, texts: list[str]) -> list[list[float]]:
+        out: list[list[float]] = []
+        for i in range(0, len(texts), 32):
+            data = _post_with_retries(
+                self.http,
+                f"{self.base_url}/api/embed",
+                json_body={"model": self.model, "input": [t[:8000] or " " for t in texts[i : i + 32]], "truncate": True},
+                headers={},
+            )
+            out += [_normalize(v) for v in data["embeddings"]]
+        return out
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._embed(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed([text])[0]
+
+
 class VoyageEmbedder:
     def __init__(self, model: str, api_key: str, timeout: float):
         self.model = model
