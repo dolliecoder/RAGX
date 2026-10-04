@@ -24,7 +24,11 @@ fix_app = typer.Typer(help="Act on a proposed fix", no_args_is_help=True)
 golden_app = typer.Typer(help="Golden evaluation set", no_args_is_help=True)
 eval_app = typer.Typer(help="Evaluations", no_args_is_help=True)
 config_app = typer.Typer(help="Runtime configuration", no_args_is_help=True)
+users_app = typer.Typer(help="Accounts (admin)", no_args_is_help=True)
+admin_app = typer.Typer(help="Server-side admin tools (run where the database is)", no_args_is_help=True)
 for sub, name in (
+    (users_app, "users"),
+    (admin_app, "admin"),
     (kb_app, "kb"),
     (source_app, "source"),
     (repair_app, "repair"),
@@ -38,12 +42,36 @@ for sub, name in (
 con = Console()
 
 
+CRED_FILE = Path(os.environ.get("RAGX_CREDENTIALS", Path.home() / ".ragx" / "credentials.json"))
+
+
+def _load_token() -> str | None:
+    try:
+        return json.loads(CRED_FILE.read_text(encoding="utf-8")).get("token")
+    except (OSError, ValueError):
+        return None
+
+
+def _save_token(token: str | None, base: str) -> None:
+    if token is None:
+        CRED_FILE.unlink(missing_ok=True)
+        return
+    CRED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CRED_FILE.write_text(json.dumps({"token": token, "api": base}), encoding="utf-8")
+    try:
+        os.chmod(CRED_FILE, 0o600)
+    except OSError:
+        pass
+
+
 class Client:
     def __init__(self) -> None:
         self.base = os.environ.get("RAGX_API_URL", "http://localhost:8000").rstrip("/")
-        headers = {}
+        headers = {"x-ragx-csrf": "1"}
         if os.environ.get("RAGX_API_KEY"):
             headers["X-API-Key"] = os.environ["RAGX_API_KEY"]
+        elif token := _load_token():
+            headers["Authorization"] = f"Bearer {token}"
         self.http = httpx.Client(base_url=self.base, headers=headers, timeout=600)
 
     def req(self, method: str, path: str, **kw: Any) -> Any:
@@ -58,6 +86,8 @@ class Client:
             except ValueError:
                 detail = r.text
             con.print(f"[red]Error {r.status_code}:[/] {detail}")
+            if r.status_code == 401:
+                con.print("Sign in with `ragx login` (or set RAGX_API_KEY).")
             raise typer.Exit(1)
         return r.json()
 
@@ -88,6 +118,112 @@ def dump(obj: Any) -> None:
     con.print_json(json.dumps(obj, default=str))
 
 
+# -------------------------------------------------------------------- auth
+@app.command()
+def login(email: str = typer.Option(..., prompt=True), password: str = typer.Option(..., prompt=True, hide_input=True)) -> None:
+    """Sign in; the session is stored in ~/.ragx/credentials.json."""
+    cl = c()
+    cl.http.headers.pop("Authorization", None)
+    r = cl.post("/api/auth/login", json={"email": email, "password": password, "return_token": True})
+    _save_token(r["token"], cl.base)
+    u = r["user"]
+    con.print(f"Signed in as {u['email']} ({u['role']}).")
+    if u.get("must_change_password"):
+        con.print("[yellow]Please change your temporary password with `ragx password`.[/]")
+
+
+@app.command()
+def logout() -> None:
+    """Sign out and forget the stored session."""
+    if _load_token():
+        try:
+            c().post("/api/auth/logout")
+        except typer.Exit:
+            pass
+    _save_token(None, "")
+    con.print("Signed out.")
+
+
+@app.command()
+def whoami() -> None:
+    """Show the signed-in account and today's usage."""
+    dump(c().get("/api/auth/me")["user"])
+
+
+@app.command()
+def password(
+    current: str = typer.Option(..., prompt="Current password", hide_input=True),
+    new: str = typer.Option(..., prompt="New password", hide_input=True, confirmation_prompt=True),
+) -> None:
+    """Change your password (signs out other devices)."""
+    cl = c()
+    cl.post("/api/auth/password", json={"current_password": current, "new_password": new})
+    con.print("Password changed. Other sessions were signed out; run `ragx login` again here.")
+    _save_token(None, "")
+
+
+@users_app.command("list")
+def users_list(search: str = "") -> None:
+    t = Table("id", "email", "name", "role", "plan", "today", "active", "last seen")
+    for u in c().get("/api/users", params={"q": search}):
+        us = u.get("usage") or {}
+        today = f"{us.get('questions_today', 0)}/{us.get('daily_limit') or '∞'}"
+        t.add_row(u["id"][:12], u["email"], u["name"], u["role"], u["plan"], today, "yes" if u["active"] else "no", (u["last_seen_at"] or "-")[:16])
+    con.print(t)
+
+
+@users_app.command("create")
+def users_create(email: str, name: str = "", admin: bool = False, plan: Optional[str] = None) -> None:
+    """Create an account; prints a temporary password to hand over."""
+    r = c().post("/api/users", json={"email": email, "name": name, "role": "admin" if admin else "user", "plan": plan})
+    con.print(f"Created {r['user']['email']}. Temporary password: [bold]{r['temporary_password']}[/] (must be changed at first sign-in)")
+
+
+@admin_app.command("create-user")
+def admin_create_user(
+    email: str,
+    admin: bool = typer.Option(False, help="give the account the admin role"),
+    password: Optional[str] = typer.Option(None, help="omit to generate a temporary one"),
+) -> None:
+    """Create an account directly in the database (bootstrap the first admin)."""
+    from .auth import create_user
+    from .bootstrap import init_app
+    from .control import audit
+    from .db import session_scope
+
+    init_app()
+    with session_scope() as s:
+        user, pw = create_user(s, email=email, role="admin" if admin else "user", password=password)
+        audit(s, "cli:admin", "user.create", user.id, email=user.email, role=user.role)
+    con.print(f"Created {email} ({'admin' if admin else 'user'}). Password: [bold]{pw}[/]")
+
+
+@admin_app.command("reset-password")
+def admin_reset_password(email: str) -> None:
+    """Reset a password directly in the database (account recovery)."""
+    from sqlalchemy import select
+
+    from .auth import end_all_sessions, hash_password, normalize_email, temp_password
+    from .bootstrap import init_app
+    from .control import audit
+    from .db import session_scope
+    from .models import User
+
+    init_app()
+    with session_scope() as s:
+        user = s.scalar(select(User).where(User.email == normalize_email(email)))
+        if user is None:
+            con.print(f"[red]No account for {email}[/]")
+            raise typer.Exit(1)
+        pw = temp_password()
+        user.password_hash = hash_password(pw)
+        user.must_change_password = True
+        user.active = True
+        end_all_sessions(s, user.id)
+        audit(s, "cli:admin", "user.reset_password", user.id, email=user.email)
+    con.print(f"New temporary password for {email}: [bold]{pw}[/]")
+
+
 # ------------------------------------------------------------------ server
 @app.command()
 def serve(host: str = "127.0.0.1", port: int = 8000, reload: bool = False) -> None:
@@ -110,6 +246,17 @@ def providers() -> None:
     con.print(f"reranker: {st['reranker']}   web search: {st['web_search']}")
     if not st["verifier_independent"]:
         con.print("[yellow]warning: generator and verifier are the same model; verification is not independent[/]")
+
+
+@app.command()
+def models(provider: str = typer.Argument(..., help="ollama | gemini | groq | openrouter"), search: str = "") -> None:
+    """List models you can use with a provider (all listed here are free)."""
+    t = Table("model", "kind", "note")
+    for m in c().get("/api/providers/models", params={"provider": provider}):
+        if search.lower() in m["id"].lower():
+            t.add_row(m["id"], m.get("kind", "chat"), m.get("note", ""))
+    con.print(t)
+    con.print(f"Use one as e.g. RAGX_GENERATOR={provider}:<model> in .env, then restart.")
 
 
 # --------------------------------------------------------------------- kbs
