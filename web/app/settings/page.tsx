@@ -28,6 +28,21 @@ function Providers() {
       <ErrorBox error={error} />
       {p && (
         <>
+          {p.ollama && !p.ollama.running && (
+            <div className="error-box small" style={{ marginBottom: 8 }}>
+              Local models are configured but Ollama is not reachable at {p.ollama.url}. Install it from ollama.com and start it.
+            </div>
+          )}
+          {p.ollama && p.ollama.running && p.ollama.missing.length > 0 && (
+            <div className="note-box small" style={{ marginBottom: 8 }}>
+              Download the local models first:{" "}
+              {p.ollama.missing.map((m) => (
+                <div key={m}>
+                  <span className="secret">ollama pull {m}</span>
+                </div>
+              ))}
+            </div>
+          )}
           {!p.verifier_independent && (
             <div className="note-box small" style={{ marginBottom: 8 }}>
               Generator and verifier are the same model: verification is not independent.
@@ -39,6 +54,7 @@ function Providers() {
                 <tr key={role}>
                   <td>
                     <b>{role}</b> {info.offline && <Badge value="offline" tone="warn" />}
+                    {p.context_tokens?.[role] && <div className="faint">{Math.round(p.context_tokens[role] / 1000)}k context</div>}
                   </td>
                   <td>
                     {info.chain.map((c, i) => (
@@ -80,7 +96,7 @@ function Providers() {
               </tr>
             </tbody>
           </table>
-          <p className="faint small mt">Providers and keys are set with RAGX_* environment variables on the API server (see .env.example).</p>
+          <p className="faint small mt">Providers and keys are set with RAGX_* environment variables on the API server (see .env.example). List the free models you can use with <span className="secret">ragx models gemini</span> (or groq, openrouter, ollama).</p>
         </>
       )}
     </div>

@@ -2,9 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { AnswerView } from "@/components/answer";
-import { NeedKB } from "@/components/shell";
+import { NeedKB, useAuth } from "@/components/shell";
 import { ErrorBox, PageHead, Spinner } from "@/components/ui";
-import { api } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 import type { Answer, Job, KB } from "@/lib/types";
 
 type Msg =
@@ -15,7 +15,18 @@ let nextId = 1;
 
 const EXAMPLES = ["What is our refund policy?", "Compare the Pro and Enterprise plans", "What does error ERR-4029 mean?"];
 
+function limitMessage(e: unknown): string {
+  if (e instanceof ApiError && e.status === 429) {
+    const kind = e.data?.limit;
+    const wait = Number(e.data?.retry_after ?? 0);
+    if (kind === "minute" || kind === "concurrent") return `${e.message} (try again in about ${Math.max(1, wait)} seconds)`;
+    return e.message;
+  }
+  return (e as Error).message;
+}
+
 function Chat({ kb }: { kb: KB }) {
+  const { user, setUsage } = useAuth();
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [text, setText] = useState("");
   const [mode, setMode] = useState("auto");
@@ -75,10 +86,11 @@ function Chat({ kb }: { kb: KB }) {
     setMsgs((m) => [...m, { id: userId, role: "user", text: query }, { id, role: "assistant", pending: true }]);
     try {
       const a = await api<Answer>(`/kbs/${kb.id}/query`, { method: "POST", json: { query, mode, session_id: sessionId } });
+      if (a.usage) setUsage(a.usage);
       setMsgs((m) => m.map((x) => (x.id === id ? { id, role: "assistant", answer: a, deep: a.job_id ? { jobId: a.job_id, status: "queued" } : undefined } : x)));
       if (a.job_id) pollDeep(id, a.job_id);
     } catch (e) {
-      setMsgs((m) => m.map((x) => (x.id === id ? { id, role: "assistant", error: (e as Error).message } : x)));
+      setMsgs((m) => m.map((x) => (x.id === id ? { id, role: "assistant", error: limitMessage(e) } : x)));
     } finally {
       setBusy(false);
     }
@@ -86,7 +98,7 @@ function Chat({ kb }: { kb: KB }) {
 
   return (
     <>
-      <PageHead title="Ask" sub={`Verified, cited answers from “${kb.name}” (${kb.documents} documents)`} />
+      <PageHead title="Ask" sub={`Answers from “${kb.name}”, checked against the sources`} />
       <div className="chat">
         {msgs.length === 0 && (
           <div className="card empty">
@@ -155,10 +167,17 @@ function Chat({ kb }: { kb: KB }) {
             <option value="standard">standard</option>
             <option value="deep">deep research</option>
           </select>
-          <button className="primary" type="submit" disabled={busy || !text.trim()}>
+          <button className="primary" type="submit" disabled={busy || !text.trim() || (user?.usage?.remaining ?? 1) <= 0}>
             {busy ? <Spinner /> : "Ask"}
           </button>
         </form>
+        {user?.usage && user.usage.remaining !== null && (
+          <div className="faint small" style={{ marginTop: 6 }}>
+            {user.usage.remaining > 0
+              ? `${user.usage.remaining} of ${user.usage.daily_limit} questions left today`
+              : `You have used today's ${user.usage.daily_limit} questions. Come back after ${new Date(user.usage.resets_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`}
+          </div>
+        )}
       </div>
     </>
   );

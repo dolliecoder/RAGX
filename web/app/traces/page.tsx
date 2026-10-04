@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { NeedKB } from "@/components/shell";
+import { NeedKB, useAuth } from "@/components/shell";
 import { Badge, Empty, ErrorBox, PageHead, Spinner, ago, num } from "@/components/ui";
 import { useFetch } from "@/lib/hooks";
 import type { KB, TraceBrief } from "@/lib/types";
@@ -10,6 +10,8 @@ import type { KB, TraceBrief } from "@/lib/types";
 const PAGE = 50;
 
 function Traces({ kb }: { kb: KB }) {
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
   const [status, setStatus] = useState("");
   const [healed, setHealed] = useState("");
   const [evalToo, setEvalToo] = useState(false);
@@ -23,7 +25,10 @@ function Traces({ kb }: { kb: KB }) {
 
   return (
     <>
-      <PageHead title="Traces" sub="Every query, every stage — the record the Repair loop learns from">
+      <PageHead
+        title={isAdmin ? "Traces" : "My questions"}
+        sub={isAdmin ? "Every query, every stage — the record the Repair loop learns from" : "Everything you have asked, with the answers and sources"}
+      >
         <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(0); }} aria-label="status filter">
           <option value="">all statuses</option>
           <option value="verified">verified</option>
@@ -37,9 +42,11 @@ function Traces({ kb }: { kb: KB }) {
           <option value="true">healed</option>
           <option value="false">first-pass</option>
         </select>
-        <label className="row small">
-          <input type="checkbox" checked={evalToo} onChange={(e) => setEvalToo(e.target.checked)} /> eval runs
-        </label>
+        {isAdmin && (
+          <label className="row small">
+            <input type="checkbox" checked={evalToo} onChange={(e) => setEvalToo(e.target.checked)} /> eval runs
+          </label>
+        )}
         <button onClick={() => void reload()}>{loading ? <Spinner /> : "Refresh"}</button>
       </PageHead>
       <ErrorBox error={error} />
@@ -69,7 +76,8 @@ function Traces({ kb }: { kb: KB }) {
                       {t.healed && <Badge value="healed" tone="info" />}
                       {t.negative_signal && <Badge value="negative" tone="bad" />}
                       {t.is_eval && <Badge value="eval" />}
-                      <span className="faint small">cfg v{t.config_version}</span>
+                      {isAdmin && t.user_email && <span className="faint small">{t.user_email}</span>}
+                      {isAdmin && <span className="faint small">cfg v{t.config_version}</span>}
                     </div>
                   </td>
                   <td>{t.route}</td>

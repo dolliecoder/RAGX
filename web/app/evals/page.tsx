@@ -75,6 +75,11 @@ function GoldenSet({ kb }: { kb: KB }) {
                   <td className="small muted">{g.expected_answer.slice(0, 200) || "–"}</td>
                   <td>
                     <Badge value={g.origin} tone={g.origin === "healed" ? "info" : g.origin === "feedback" ? "warn" : ""} />
+                    {g.origin === "feedback" && !g.active && (
+                      <div className="small" style={{ color: "var(--warn)" }}>
+                        student correction: check it, then Enable
+                      </div>
+                    )}
                   </td>
                   <td className="right">
                     <div className="row" style={{ justifyContent: "flex-end" }}>

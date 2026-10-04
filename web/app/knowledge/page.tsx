@@ -314,6 +314,22 @@ export default function KnowledgePage() {
   return (
     <>
       <PageHead title="Knowledge" sub={kb ? `${kb.name}: ${kb.documents} documents · ${kb.tokens.toLocaleString()} tokens` : "Create a knowledge base to begin"}>
+        {kb && (
+          <label className="row small muted">
+            Visible to
+            <select
+              value={kb.visibility}
+              onChange={async (e) => {
+                await api(`/kbs/${kb.id}`, { method: "PATCH", json: { visibility: e.target.value } });
+                void refresh();
+              }}
+              aria-label="who can ask this knowledge base"
+            >
+              <option value="all">all students</option>
+              <option value="admins">admins only (draft)</option>
+            </select>
+          </label>
+        )}
         <CreateKB />
       </PageHead>
       {kb ? (
