@@ -3,15 +3,14 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import FIXTURES, set_config
+from conftest import FIXTURES, make_client, set_config
 
 
 @pytest.fixture()
-def client(env):
-    from ragx.api import app
-
-    with TestClient(app) as c:
-        yield c
+def client(env, monkeypatch):
+    c = make_client(monkeypatch)
+    yield c
+    c.__exit__(None, None, None)
 
 
 def test_full_http_flow(client, docs_dir):
@@ -96,7 +95,7 @@ def test_validation_and_404(client):
     assert client.post("/api/fixes/missing/approve").status_code == 404
 
 
-def test_api_key_required(env, monkeypatch):
+def test_service_key_acts_as_admin(env, monkeypatch):
     from ragx import config
     from ragx.api import app
 
@@ -107,17 +106,17 @@ def test_api_key_required(env, monkeypatch):
         assert c.get("/api/kbs").status_code == 401
         assert c.get("/api/kbs", headers={"X-API-Key": "wrong"}).status_code == 401
         assert c.get("/api/kbs", headers={"X-API-Key": "s3cret"}).status_code == 200
+        assert c.post("/api/kbs", json={"name": "svc"}, headers={"X-API-Key": "s3cret"}).status_code == 201
 
 
 def test_source_roots_restriction(env, monkeypatch, docs_dir, tmp_path):
     from ragx import config
-    from ragx.api import app
 
     allowed = tmp_path / "allowed"
     allowed.mkdir()
     monkeypatch.setenv("RAGX_SOURCE_ROOTS", str(allowed))
     config.get_settings.cache_clear()
-    with TestClient(app) as c:
+    with make_client(monkeypatch) as c:
         kb = c.post("/api/kbs", json={"name": "r"}).json()["id"]
         assert c.post(f"/api/kbs/{kb}/sources", json={"kind": "directory", "uri": str(docs_dir)}).status_code == 403
         assert c.post(f"/api/kbs/{kb}/sources", json={"kind": "directory", "uri": str(allowed)}).status_code == 201

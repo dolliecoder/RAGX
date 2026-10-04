@@ -22,7 +22,7 @@ os.environ.update(
         "RAGX_WEB_SEARCH_PROVIDER": "none",
     }
 )
-for k in ("RAGX_ANTHROPIC_API_KEY", "RAGX_OPENAI_API_KEY", "RAGX_GEMINI_API_KEY", "RAGX_API_KEY"):
+for k in ("RAGX_ANTHROPIC_API_KEY", "RAGX_OPENAI_API_KEY", "RAGX_GEMINI_API_KEY", "RAGX_API_KEY", "RAGX_ADMIN_EMAILS"):
     os.environ.pop(k, None)
 
 
@@ -46,6 +46,11 @@ def env(tmp_path, monkeypatch):
     set_registry(None)
     index.invalidate()
     set_runner(JobRunner(inline=True))
+    from ragx import limits
+    from ragx.auth import login_guard
+
+    limits.live.reset()
+    login_guard.reset()
     from ragx.bootstrap import init_app
 
     init_app()
@@ -100,3 +105,25 @@ def ask(kb_id, question, **opts):
     with session_scope() as s:
         v, cfg = active_config(s)
         return QueryEngine(s, kb_id, cfg, v).answer(question, QueryOptions(**opts))
+
+
+ADMIN_EMAIL = "admin@college.test"
+PASSWORD = "Sup3r-secret!"
+
+
+def make_client(monkeypatch, *, admin=True):
+    """TestClient that sends the CSRF header; signs up the admin account."""
+    from fastapi.testclient import TestClient
+
+    from ragx import config
+    from ragx.api import app
+
+    monkeypatch.setenv("RAGX_ADMIN_EMAILS", ADMIN_EMAIL)
+    config.get_settings.cache_clear()
+    c = TestClient(app, headers={"x-ragx-csrf": "1"})
+    c.__enter__()
+    if admin:
+        r = c.post("/api/auth/signup", json={"email": ADMIN_EMAIL, "password": PASSWORD, "name": "Admin"})
+        assert r.status_code == 201, r.text
+        assert r.json()["user"]["role"] == "admin"
+    return c
