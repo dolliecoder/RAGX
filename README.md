@@ -1,143 +1,205 @@
-# RAGX: self-healing RAG platform
+# RAGX: the self-healing RAG platform
 
-RAGX answers questions from your documents with **verified, cited answers**, and **repairs itself**. It heals a bad answer while the query is running, and it fixes the root cause (index, chunks, vocabulary, config, prompts) offline so the same failure does not happen again.
+**Ask questions about your documents. Get answers you can check. Watch the system fix its own mistakes.**
 
-The design and the reasoning behind every choice are in [ARCHITECTURE.md](ARCHITECTURE.md). In one line, it combines ideas from three systems:
+RAGX is a free, open-source question-answering platform for your own documents (PDF, Word, HTML, Markdown, text). Unlike a plain chatbot over files, it:
 
-- **Google Search:** hybrid BM25 + dense retrieval, a ranking cascade, twiddlers, NavBoost-style click signals, incremental indexing, and changes tested before launch.
-- **Gemini grounding:** a gate that decides whether to retrieve, span-level citations, and a per-claim grounding check with support and contradiction scores.
-- **Claude Research / Contextual Retrieval:** contextualized chunks, rerank 150 → 20, orchestrator-worker deep research, a citation pass, checkpoints and gradual rollouts.
+- **Shows its sources.** Every sentence links to the exact passage it came from.
+- **Checks itself.** A second, independent model verifies every claim. Unsupported claims are removed, and if the answer isn't in your documents it says so instead of guessing.
+- **Heals while answering.** When the first search misses, it rewrites the query, looks further, and tries exact matches before giving up.
+- **Repairs itself over time.** In the background it works out *why* a question failed and proposes a fix. It tests the fix before applying it, and rolls it back if things get worse. Every fixed failure becomes a permanent regression test.
+- **Runs on free models.** Gemini's free tier, Groq, OpenRouter's free models, or fully local open-source models with Ollama. No credit card needed.
+- **Is ready for a classroom.** It has accounts, a join code for your class, per-student daily limits, and a private question history for each student.
+
+> **Status: early (v0.1).** The engine, self-repair loop, accounts and dashboard work and are covered by 60+ automated tests. It has not yet been used at scale; expect rough edges, and please report them.
+
+## Run it in 5 minutes
+
+You need [Docker Desktop](https://www.docker.com/products/docker-desktop/).
+
+1. **Get the code and the settings file:**
+
+   ```bash
+   git clone https://github.com/dolliecoder/RAGX.git
+   ```
+
+   ```bash
+   cd RAGX && cp .env.example .env
+   ```
+
+2. **Pick a free model setup** (details below). The quickest is to paste a free Gemini key from [aistudio.google.com](https://aistudio.google.com) into `.env`:
+   ```
+   RAGX_GEMINI_API_KEY=your-key
+   ```
+   Also put your email in `RAGX_ADMIN_EMAILS=` so your account becomes the admin.
+
+3. **Put your documents in a `docs` folder** inside `RAGX`.
+
+4. **Start it:**
+
+   ```bash
+   docker compose up -d --build
+   ```
+
+5. **Open http://localhost:3000**, sign up with your admin email, and go to **Knowledge**. Create a knowledge base, add the source `/docs`, then ask a question on **Ask**.
+
+No key yet? It still starts, in **offline mode**. Everything works, but answers are simple extracts.
+
+## Free model setups
+
+RAGX uses three model roles, plus embeddings for search:
+- a **generator** that writes answers,
+- an **independent verifier** that fact-checks them,
+- a **utility** model for small helper steps.
+
+All three setups below are free. Choose in `.env`; [.env.example](.env.example) has each one ready to copy.
+
+| Setup | What you need | Speed | Limits | Privacy |
+|---|---|---|---|---|
+| **A. Gemini free tier** (default) | Free key from aistudio.google.com | ~5–15 s per answer | Daily request limits per model (lite models are the most generous) | Google may use free-tier requests to improve its products |
+| **B. Local open models (Ollama)** | [Ollama](https://ollama.com) + ~8 GB free RAM | 30–90 s on a laptop CPU; fast with a GPU | None | Nothing leaves your machine |
+| **C. Mix free clouds** | Free keys from [Groq](https://console.groq.com) / [OpenRouter](https://openrouter.ai) (`:free` models) + Gemini | Fast | Each provider's free limits; RAGX fails over between them | Per provider |
+
+For setup B, download the models once:
+
+```bash
+ollama pull qwen3:4b
+```
+
+```bash
+ollama pull gemma3:4b
+```
+
+```bash
+ollama pull nomic-embed-text
+```
+
+Then use the `ollama:` lines from `.env.example`. Docker reaches Ollama on your computer automatically; on a server you can run the bundled container instead with `docker compose --profile ollama up -d`.
+
+Model names change every few months. To see which models your key or Ollama install can use right now:
+
+```bash
+ragx models gemini
+```
+
+(also `groq`, `openrouter` and `ollama`). In the dashboard, **Settings → Model providers** shows what is connected, which local models still need downloading, and each model's context size. RAGX adapts to small local context windows automatically.
+
+Paid providers (Anthropic, OpenAI, LM Studio and vLLM through an OpenAI-compatible URL) are supported too, but never required.
+
+## For a class: accounts and limits
+
+- **Become admin:** put your email in `RAGX_ADMIN_EMAILS`, then sign up with it. Everyone else becomes a student.
+- **Invite students:**
+  1. Go to **Users → Access & limits**.
+  2. Set your college email domain.
+  3. Click **Generate** for a join code, then **copy link**.
+  4. Share the link with your class.
+
+  Emails aren't verified yet, so the join code is the real gate. Change it every term.
+- **Limits per plan** (`free`, `pro`):
+  - questions per day, per minute, and at once
+  - deep-research runs per day
+  - per-student overrides
+  - an optional **site-wide daily cap**, so a shared free quota can't be drained by one person
+
+  Admins are never limited, and questions that fail because of a provider outage aren't counted.
+- **Privacy:** students see only their own questions. Student "this is wrong" corrections wait for admin review before they're used as tests.
+- **Security:** scrypt password hashes, HttpOnly session cookies, CSRF protection, lockout after 5 failed sign-ins, an audit log of every admin action, and safe defaults for folder sources. See [SECURITY.md](SECURITY.md).
+- **Locked out?** Run this on the server:
+
+  ```bash
+  docker compose exec api ragx admin reset-password you@college.edu
+  ```
+
+## How it works
+
+The full design and the reasoning behind it are in [ARCHITECTURE.md](ARCHITECTURE.md). In short, RAGX combines published ideas from web search, Gemini grounding and Anthropic's Contextual Retrieval:
 
 ```
-        ┌──────── Reflex loop (per query, seconds) ────────────────────────────────────────┐
-query → gate → plan/fan-out → BM25 ∥ dense ∥ exact → RRF → cascade rerank → twiddlers → CRAG grade
-        → [heal: widen ▸ rewrite ▸ cold tier + exact ▸ neighbours ▸ web] → generate with span citations
-        → independent verifier → [heal: repair citations ▸ drop unsupported ▸ conflict mode ▸ re-retrieve]
-        → verified | partial (+ async deep research) | honest "not found"
-        └──────────────────────────────────────────────────────────────────────────────────┘
-   every step → trace ("Glue" log) + user signals (thumbs, re-asks, copies, citation clicks)
-        ┌──────── Repair loop (background, minutes) ──────────────────────────────────────┐
-mine failures → diagnose root cause (12 types) → propose config/data fix → eval gate (targets + golden set)
-  → low risk: apply · medium: canary → promote/rollback on live metrics · high: human approval
+        ┌──────── Reflex loop (per question, seconds) ───────────────────────────────────────┐
+question → gate → plan / fan-out → keyword ∥ semantic ∥ exact search → fuse → rerank → rules → grade
+        → [heal: look further ▸ rewrite ▸ archived docs + exact match ▸ neighbouring passages ▸ web]
+        → write answer with citations → independent verifier
+        → [heal: fix citations ▸ drop unsupported claims ▸ surface conflicts ▸ search again]
+        → verified | partial (+ background deep research) | honest "not found"
+        └────────────────────────────────────────────────────────────────────────────────────┘
+   every step → trace + user signals (thumbs, re-asks, copies, citation clicks)
+        ┌──────── Repair loop (background, minutes) ─────────────────────────────────────────┐
+find failures → diagnose root cause (12 types) → propose a data or config fix
+  → test it on the failing questions + regression set
+  → low risk: apply · medium: trial on part of the traffic, then keep or undo · high: ask an admin
   → every fixed failure becomes a regression test · every change is versioned and reversible
-        └─────────────────────────────────────────────────────────────────────────────────┘
-   Resilience loop: provider fallback chains + circuit breakers, graceful degradation, durable jobs
-   with checkpoints, blue/green document versions, rollback of config versions
+        └────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Quick start (Docker)
+## Dashboard and command line
+
+The **web dashboard** has these pages:
+- **Ask**
+- **Health** (quality metrics)
+- **Traces** (every step of every answer)
+- **Repair** (diagnoses and fixes to approve)
+- **Knowledge** (documents and sources)
+- **Evals** (regression tests)
+- **Users**
+- **Settings**
+
+The **CLI** (`pip install -e backend`) talks to the same API:
 
 ```bash
-cp .env.example .env
-```
-
-Edit `.env`. Add API keys for the providers you use, and set `RAGX_DOCS_DIR` to a folder of documents. Then:
-
-```bash
-docker compose up -d --build
-```
-
-Open http://localhost:3000. Create a knowledge base on **Knowledge**, then add the source path `/docs` (your mounted folder) or upload files, then ask questions on **Ask**.
-
-Without any API keys RAGX runs in **offline mode**. Deterministic heuristics stand in for the models, so the whole platform works and the UI shows an "offline provider" badge, but answers are only extractive. Add keys to get real quality.
-
-## Local development
-
-Backend (Python 3.11+):
-
-```bash
-cd backend
-python -m venv .venv && .venv/Scripts/activate      # Windows; on Linux/macOS: source .venv/bin/activate
-pip install -e ".[dev]"            # add ",postgres" to use PostgreSQL (psycopg wheels need Python <= 3.13 on Windows)
-ragx serve                          # API on http://localhost:8000 (SQLite by default)
-pytest                              # 31 tests, offline and deterministic
-```
-
-To run the test suite against PostgreSQL + pgvector, set `RAGX_TEST_DATABASE_URL=postgresql+psycopg://user:pass@host:5432/db`.
-
-Web dashboard (Node 20+):
-
-```bash
-cd web
-npm install
-npm run dev                         # http://localhost:3000; set RAGX_API_URL if the API is not on :8000
-```
-
-## CLI
-
-The CLI is a thin client of the API (`RAGX_API_URL`, `RAGX_API_KEY`):
-
-```bash
+ragx login
 ragx kb create handbook
-ragx source add handbook ./docs                  # folder, file or https:// URL; crawled and indexed
-ragx upload handbook policy.pdf faq.docx
+ragx source add handbook ./docs              # folder, file or https:// URL
 ragx ask handbook "How many vacation days do new employees get?" --show-trace
-ragx feedback <trace_id> --rating -1 --correction "25 days"
-ragx repair run handbook                         # diagnose, propose, eval-gate and apply fixes now
-ragx repair list handbook
-ragx fix approve <fix_id>                        # high-risk fixes wait for a human
-ragx golden import handbook tests.jsonl
-ragx eval run handbook --min-pass 0.85           # exits non-zero below threshold, so it works as a CI gate
-ragx config set gate_threshold 0.25
-ragx providers                                   # chains, circuit breakers, offline warnings
+ragx repair run handbook                     # diagnose and fix now
+ragx eval run handbook --min-pass 0.85       # non-zero exit below threshold: use as a CI gate
+ragx models groq                             # free models you can use
+ragx users list
 ```
 
-## Configuration
+## Develop
 
-**Process settings** are environment variables, all prefixed `RAGX_`. See [.env.example](.env.example).
+```bash
+cd backend && python -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"
+```
 
-- **Model roles** use the form `provider:model`, with providers `anthropic | openai | gemini | fake`:
-  - `GENERATOR` writes answers. The default is `anthropic:claude-opus-5-5`.
-  - `VERIFIER` is the independent grounding checker. It should be a *different* provider or model; the default is `gemini:gemini-3.5-flash`.
-  - `UTILITY` handles the gate, planner, grader, reranker and contextualizer. The default is `anthropic:claude-haiku-4-5`.
-  - `JUDGE` scores evals and defaults to the verifier.
-  - Each role can have `*_FALLBACKS`, a comma-separated chain that is used when a provider fails (circuit breaker).
+The backend tests are offline and deterministic, so no API keys are needed:
 
-  Model names change. Set the ones your accounts have access to, and check them with `ragx providers`.
-- **Retrieval:** `EMBEDDER` is `openai | gemini | voyage | hash`, and `RERANKER` is `cohere | voyage | llm:utility | lexical`.
-- **Web fallback:** `WEB_SEARCH_PROVIDER` is `tavily | brave`. It is used only if `web_fallback_enabled` is true in the runtime config, and that is off by default.
-- **Security:**
-  - `API_KEY` makes every API call require an `X-API-Key` header. The web proxy adds it server-side, so the key never reaches the browser.
-  - `SOURCE_ROOTS` restricts folder and file sources to the listed paths. Docker sets it to `/docs,/app/data`.
+```bash
+pytest
+```
 
-**Runtime config** is versioned in the database and editable in **Settings**. It holds everything the Repair loop may tune: the gate threshold, tier budgets, retrieval sizes (`retrieve_k=150 → stage1_k=50 → final_k=20`), fusion weights, twiddler rules (`doc_boosts`, `max_chunks_per_doc`), `query_aliases`, verification thresholds (`min_groundedness=0.9`, `max_contradiction=0.1`, `min_coverage=0.8`), canary settings and prompt add-ons.
+```bash
+cd web && npm install && npm run dev
+```
 
-## How self-healing works in practice
+See [CONTRIBUTING.md](CONTRIBUTING.md). Adding another free model provider is a great first contribution.
 
-1. **During a query**, if the right evidence is missing, the Reflex loop tries a fixed ladder:
-   - the next-ranked candidates,
-   - query rewrites,
-   - the cold tier and exact identifier search,
-   - chunks adjacent to the evidence,
-   - the web, only if enabled.
-
-   Once evidence is found, the verifier removes claims it cannot support, and the answer reports anything still unanswered. Research-level questions are sent to a background deep-research job.
-2. **In the background**, the Repair loop reads those traces and diagnoses *why* the first pass failed. For example, a heal that succeeded via a query rewrite means users and the documents use different words. It then proposes a fix, such as adding the users' phrasing to that chunk's index context in a staged copy of the document.
-3. **Every fix goes through the eval gate.** It is run against the failing queries and the golden set, on both the current and the candidate configuration. It must improve the targets without regressing the golden set.
-4. **Risk policy:**
-   - Low-risk fixes are applied automatically.
-   - Medium-risk changes run as a canary and are promoted or rolled back automatically from live metrics.
-   - High-risk changes (prompt edits, quarantining documents, content gaps) wait on **Repair** for your approval.
-5. **Every applied fix** becomes a golden regression test and can be rolled back with one click.
-
-## Project layout
+### Project layout
 
 ```
 backend/ragx/
-  api.py, cli.py            HTTP API and CLI
-  config.py, control.py     settings, versioned runtime config, canary routing, audit
-  ingestion/                parsers (pdf/docx/html/md/txt), chunker, contextualizer, crawler, versions
-  retrieval/                BM25 + dense index, exact match, web, RRF, rerankers, twiddlers
-  reflex/engine.py, deep.py query-time healing pipeline; orchestrator-worker deep research
-  repair/                   failure miner + diagnoser; proposer, eval gate, apply/canary/rollback
-  evals.py, metrics.py      golden-set runner + LLM judge; health SLOs
-  llm/                      provider adapters, fallback chains, offline provider, embeddings
-  jobs.py, tasks.py         durable checkpointed jobs, scheduler loops
-web/                        Next.js dashboard: Ask, Health, Traces, Repair, Knowledge, Evals, Settings
+  api.py, api_accounts.py, cli.py   HTTP API, accounts API, CLI
+  auth.py, limits.py, deps.py       accounts, sessions, roles, usage limits
+  ingestion/                        parsers, chunker, contextualizer, crawler, document versions
+  retrieval/                        keyword + semantic index, exact match, web, fusion, rerankers, rules
+  reflex/                           query-time healing pipeline, deep research
+  repair/                           diagnoser, fix proposer, eval gate, trial/rollback
+  llm/                              free + paid providers, fallback chains, offline model, embeddings
+web/                                Next.js dashboard
 ```
 
-## Limits and next steps
+## Known limits
 
-- Dense search runs in memory over pgvector-stored embeddings. That is comfortable up to around a few hundred thousand chunks; beyond that, move to a pgvector HNSW index or Qdrant.
-- Fine-tuning learned rankers on interaction logs (architecture phase P5) is not implemented. Helpfulness priors from feedback are.
-- Single-tenant only. Multi-tenant isolation (per-tenant indexes, traces and priors) is the next step for cloud deployment.
+- No email verification or "forgot password" email yet; admins reset passwords from the Users page.
+- Semantic search runs in memory, which is fine up to a few hundred thousand passages; beyond that, add a pgvector HNSW index.
+- One organisation per install (no multi-tenancy yet).
+- Free tiers change their limits and model names often; `ragx models` and **Settings** help you keep up.
+
+## License
+
+RAGX is free software under the **[GNU AGPL-3.0](LICENSE)** (or any later version). In plain words:
+- You may use, study, change and share it, including commercially.
+- If you **run a modified version as a service for others**, you must offer those users the source code of your version.
+
+This keeps improvements open for everyone.

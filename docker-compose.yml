@@ -24,6 +24,10 @@ services:
       RAGX_DATA_DIR: /app/data
       RAGX_SOURCE_ROOTS: /docs,/app/data
       RAGX_CORS_ORIGINS: http://localhost:3000
+      # Ollama running on this computer (default) or the bundled one (--profile ollama)
+      RAGX_OLLAMA_URL: ${RAGX_OLLAMA_URL:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - apidata:/app/data
       - ${RAGX_DOCS_DIR:-./docs}:/docs:ro
@@ -38,7 +42,6 @@ services:
     build: ./web
     environment:
       RAGX_API_URL: http://api:8000
-      RAGX_API_KEY: ${RAGX_API_KEY:-}
     ports:
       - "127.0.0.1:3000:3000"
     depends_on:
@@ -46,6 +49,18 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Optional: run open-source models inside Docker instead of installing Ollama.
+  #   docker compose --profile ollama up -d
+  #   docker compose exec ollama ollama pull qwen3:4b
+  # and set RAGX_OLLAMA_URL=http://ollama:11434 in .env
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    volumes:
+      - ollama:/root/.ollama
+    restart: unless-stopped
+
 volumes:
   pgdata:
   apidata:
+  ollama:
