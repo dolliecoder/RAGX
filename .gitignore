@@ -1,0 +1,16 @@
+.env
+*.db
+*.db-shm
+*.db-wal
+data/
+docs/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+node_modules/
+.next/
+*.tsbuildinfo
+.claude/launch.json

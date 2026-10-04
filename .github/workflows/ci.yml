@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: ragx
+          POSTGRES_PASSWORD: ragx
+          POSTGRES_DB: ragx_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ragx -d ragx_test" --health-interval 5s --health-timeout 5s --health-retries 20
+    strategy:
+      matrix:
+        db: [sqlite, postgres]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e "backend[dev,postgres]" ruff
+      - run: ruff check backend/ragx backend/tests --select F,E9,B --ignore B008,B904,B905
+      - name: tests
+        working-directory: backend
+        env:
+          RAGX_TEST_DATABASE_URL: ${{ matrix.db == 'postgres' && 'postgresql+psycopg://ragx:ragx@localhost:5432/ragx_test' || '' }}
+        run: pytest -q
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run build

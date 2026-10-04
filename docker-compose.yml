@@ -1,0 +1,51 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ragx
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ragx}
+      POSTGRES_DB: ragx
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ragx -d ragx"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    build: ./backend
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      RAGX_DATABASE_URL: postgresql+psycopg://ragx:${POSTGRES_PASSWORD:-ragx}@db:5432/ragx
+      RAGX_DATA_DIR: /app/data
+      RAGX_SOURCE_ROOTS: /docs,/app/data
+      RAGX_CORS_ORIGINS: http://localhost:3000
+    volumes:
+      - apidata:/app/data
+      - ${RAGX_DOCS_DIR:-./docs}:/docs:ro
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build: ./web
+    environment:
+      RAGX_API_URL: http://api:8000
+      RAGX_API_KEY: ${RAGX_API_KEY:-}
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  apidata:
