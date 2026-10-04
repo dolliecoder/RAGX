@@ -1,4 +1,4 @@
-export type KB = { id: string; name: string; description: string; documents: number; tokens: number; created_at: string };
+export type KB = { id: string; name: string; description: string; visibility: "all" | "admins"; documents: number; tokens: number; created_at: string };
 
 export type Citation = {
   n: number;
@@ -34,6 +34,7 @@ export type Answer = {
   metrics: Metrics;
   job_id: string | null;
   trace_id?: string;
+  usage?: Usage;
   config_version: number;
   llm: { calls: number; tokens_in: number; tokens_out: number; by_task: Record<string, number> };
   latency_ms: number;
@@ -57,6 +58,8 @@ export type TraceBrief = {
   config_version: number;
   is_eval: boolean;
   session_id: string | null;
+  user_id?: string | null;
+  user_email?: string | null;
   created_at: string;
 };
 
@@ -230,7 +233,55 @@ export type HealthMetrics = {
 export type ProviderStatus = {
   roles: Record<string, { chain: { provider: string; state: string; last_error: string }[]; notes: string[]; offline: boolean }>;
   verifier_independent: boolean;
+  ollama: { url: string; running: boolean; missing: string[] } | null;
+  context_tokens: Record<string, number>;
   embedder: { model: string; note: string };
   reranker: string;
   web_search: { provider: string; available: boolean };
+};
+
+export type Usage = {
+  plan: string;
+  questions_today: number;
+  daily_limit: number | null;
+  remaining: number | null;
+  deep_today: number;
+  deep_limit: number | null;
+  per_minute: number | null;
+  resets_at: string;
+};
+
+export type User = {
+  id: string;
+  email: string;
+  name: string;
+  role: "user" | "admin";
+  plan: string;
+  daily_limit_override: number | null;
+  active: boolean;
+  must_change_password: boolean;
+  created_at: string;
+  last_login_at: string | null;
+  last_seen_at: string | null;
+  usage: Usage | null;
+};
+
+export type PlanLimits = { daily_questions: number; per_minute: number; deep_per_day: number; max_concurrent: number };
+
+export type AccessPolicy = {
+  signup_enabled: boolean;
+  allowed_email_domains: string[];
+  join_code: string;
+  default_plan: string;
+  plans: Record<string, PlanLimits>;
+  global_daily_questions: number;
+};
+
+export type AuthOptions = { signup_enabled: boolean; allowed_email_domains: string[]; requires_join_code: boolean };
+
+export type UsageStats = {
+  days: { day: string; questions: number; deep: number; active_users: number; tokens_in: number; tokens_out: number }[];
+  top_users_today: { email: string; questions: number }[];
+  today: { questions: number; global_limit: number | null };
+  users: { total: number; active_today: number };
 };

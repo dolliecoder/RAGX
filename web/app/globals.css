@@ -221,3 +221,16 @@ details > summary { cursor: pointer; color: var(--muted); }
 .chart .line { fill: none; stroke: var(--accent); stroke-width: 2; }
 .chart .line2 { fill: none; stroke: var(--ok); stroke-width: 2; }
 .chart text { fill: var(--faint); font-size: 10px; }
+
+/* ------------------------------------------------------------ auth + account */
+.auth-page { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; }
+.auth-card { width: 100%; max-width: 400px; }
+.auth-card h1 { margin-bottom: 4px; }
+.auth-card form { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+.auth-card input { width: 100%; }
+.auth-card button.primary { justify-content: center; padding: 9px 12px; }
+.user-box { margin-top: auto; display: flex; flex-direction: column; gap: 8px; padding: 10px 8px 0; border-top: 1px solid var(--border); }
+.secret { font-family: var(--mono); background: var(--panel-2); padding: 6px 10px; border-radius: 8px; user-select: all; display: inline-block; }
+@media (max-width: 860px) {
+  .user-box { margin-top: 0; border-top: none; padding: 0; flex-direction: row; align-items: center; }
+}
