@@ -29,7 +29,7 @@ class Settings(BaseSettings):
 
     # Role -> "provider:model". Providers: anthropic, openai, gemini, fake.
     generator: str = "anthropic:claude-opus-5-5"
-    verifier: str = "gemini:gemini-2.5-pro"
+    verifier: str = "gemini:gemini-3.5-flash"
     utility: str = "anthropic:claude-haiku-4-5"  # gate, planner, grader, contextualizer
     judge: str = ""  # eval judge; defaults to verifier
     # Optional fallback chains, comma separated "provider:model" entries.

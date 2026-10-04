@@ -29,7 +29,14 @@ def _post_with_retries(client: httpx.Client, url: str, *, json_body: dict, heade
                 return r.json()
             if r.status_code not in _RETRY_STATUS:
                 raise ProviderError(f"HTTP {r.status_code}: {r.text[:500]}", retryable=False)
+            if r.status_code == 429 and "PerDay" in r.text:
+                # Daily quota exhausted: retrying cannot help, fail over immediately.
+                raise ProviderError(f"daily quota exhausted: {r.text[:300]}", retryable=False)
             last = ProviderError(f"HTTP {r.status_code}: {r.text[:300]}")
+            # An overloaded model rarely recovers within seconds: retry once, then let the
+            # registry fail over to the next provider in the chain.
+            if r.status_code in (503, 529) and attempt >= 1:
+                break
         if attempt < attempts - 1:
             time.sleep(min(2**attempt + random.random(), 20))
     raise ProviderError(f"request failed after {attempts} attempts: {last}")
@@ -159,13 +166,26 @@ class GeminiProvider:
         gen_cfg: dict[str, Any] = {"maxOutputTokens": max(req.max_tokens * 2, 8192)}
         if req.schema:
             gen_cfg["responseMimeType"] = "application/json"
+            gen_cfg["responseJsonSchema"] = req.schema  # enforces the exact output shape
+        # Helper steps use low effort, answer writing and verification medium: Gemini 3
+        # defaults to high thinking, which measured slower with identical answers.
+        if req.effort in ("low", "medium") and self.model.startswith("gemini-3"):
+            gen_cfg["thinkingConfig"] = {"thinkingLevel": req.effort}
         body = {
             "systemInstruction": {"parts": [{"text": req.system}]},
             "contents": [{"role": "user", "parts": [{"text": req.user}]}],
             "generationConfig": gen_cfg,
         }
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
-        data = _post_with_retries(self.http, url, json_body=body, headers=self.headers)
+        try:
+            data = _post_with_retries(self.http, url, json_body=body, headers=self.headers)
+        except ProviderError as e:
+            optional = [k for k in ("thinkingConfig", "responseJsonSchema") if k in gen_cfg]
+            if e.retryable or not optional:
+                raise
+            for k in optional:  # model rejected an optional setting: retry with defaults
+                gen_cfg.pop(k)
+            data = _post_with_retries(self.http, url, json_body=body, headers=self.headers)
         cands = data.get("candidates") or []
         if not cands:
             reason = (data.get("promptFeedback") or {}).get("blockReason", "no candidates")

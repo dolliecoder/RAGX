@@ -311,6 +311,7 @@ def generate(
         },
         cfg,
         max_tokens=4000,
+        effort="medium",
     )
 
 
@@ -347,6 +348,7 @@ def verify(
         {"query": query, "subquestions": subquestions, "sentences": sentences, "evidence": evidence},
         cfg,
         max_tokens=4000,
+        effort="medium",
     )
 
 

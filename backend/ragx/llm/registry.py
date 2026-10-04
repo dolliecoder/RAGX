@@ -151,6 +151,12 @@ class Registry:
                         r = LLMRequest(**{**req.__dict__, "user": req.user + "\n\nYour previous reply was not valid JSON. Reply with ONLY the JSON object."})
                     resp = p.complete(r)
                     resp.data = resp.data if resp.data is not None else extract_json(resp.text)
+                    # Some models wrap the object in a one-element list.
+                    if req.schema and req.schema.get("type") == "object" and isinstance(resp.data, list):
+                        if len(resp.data) == 1 and isinstance(resp.data[0], dict):
+                            resp.data = resp.data[0]
+                        else:
+                            raise ValueError("expected a JSON object, got a list")
                     br.ok()
                     if meter is not None:
                         meter.record(resp)

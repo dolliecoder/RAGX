@@ -88,7 +88,7 @@ ragx providers                                   # chains, circuit breakers, off
 
 - **Model roles** use the form `provider:model`, with providers `anthropic | openai | gemini | fake`:
   - `GENERATOR` writes answers. The default is `anthropic:claude-opus-5-5`.
-  - `VERIFIER` is the independent grounding checker. It should be a *different* provider or model; the default is `gemini:gemini-2.5-pro`.
+  - `VERIFIER` is the independent grounding checker. It should be a *different* provider or model; the default is `gemini:gemini-3.5-flash`.
   - `UTILITY` handles the gate, planner, grader, reranker and contextualizer. The default is `anthropic:claude-haiku-4-5`.
   - `JUDGE` scores evals and defaults to the verifier.
   - Each role can have `*_FALLBACKS`, a comma-separated chain that is used when a provider fails (circuit breaker).
