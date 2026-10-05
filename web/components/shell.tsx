@@ -34,7 +34,7 @@ const PUBLIC = ["/login", "/signup", "/forgot", "/reset", "/verify"];
 const ADMIN_ONLY = ["/health", "/repair", "/knowledge", "/evals", "/users", "/settings"];
 
 type NavItem = { href: string; label: string; icon: string; badge?: boolean };
-const STUDENT_NAV: NavItem[] = [
+const MEMBER_NAV: NavItem[] = [
   { href: "/ask", label: "Ask", icon: "◎" },
   { href: "/traces", label: "My questions", icon: "≡" },
 ];
@@ -197,7 +197,7 @@ export function Shell({ children }: { children: ReactNode }) {
     );
   }
 
-  const nav = isAdmin ? ADMIN_NAV : STUDENT_NAV;
+  const nav = isAdmin ? ADMIN_NAV : MEMBER_NAV;
   const blocked = !isAdmin && ADMIN_ONLY.some((p) => path.startsWith(p));
 
   return (
@@ -302,7 +302,7 @@ export function NeedKB({ children }: { children: (kb: KB) => ReactNode }) {
               No knowledge base yet. <Link href="/knowledge">Create one and add documents</Link>.
             </>
           ) : (
-            <>No course material has been published yet. Check back soon.</>
+            <>Nothing has been published here yet. Check back soon.</>
           )
         ) : (
           <span className="spinner" />

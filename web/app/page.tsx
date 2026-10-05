@@ -24,8 +24,8 @@ const STEPS = [
 ];
 
 const LOOP = [
-  { t: "A question fails", d: "A student asks how to get their money back; the first search misses." },
-  { t: "Diagnosed", d: "Students say “money back”, the policy says “refund”: a vocabulary gap." },
+  { t: "A question fails", d: "Someone asks how to get their money back; the first search misses." },
+  { t: "Diagnosed", d: "People say “money back”, the policy says “refund”: a vocabulary gap." },
   { t: "Fix proposed", d: "Teach the search that this passage answers “money back” questions." },
   { t: "Tested first", d: "Re-run the failing questions and every saved test, before and after." },
   { t: "Applied or undone", d: "Better and nothing broke? Applied. Worse? Rolled back automatically." },
@@ -64,8 +64,8 @@ const FAQ = [
     a: "Your documents and questions stay in your own installation. They are only sent to the AI provider you choose. With local Ollama models, nothing leaves your machine at all. Note that Google may use free-tier Gemini requests to improve its products.",
   },
   {
-    q: "Can students see each other's questions?",
-    a: "No. Each student sees only their own history. Administrators can see questions so they can improve the material and approve fixes.",
+    q: "Can other people see my questions?",
+    a: "No. Each person sees only their own history. Administrators can see questions so they can improve the documents and approve fixes.",
   },
   {
     q: "What does the AGPL license mean for me?",
@@ -140,7 +140,7 @@ export default function Landing() {
         <nav className="lp-links" aria-label="Sections">
           <a href="#how">How it works</a>
           <a href="#models">Free models</a>
-          <a href="#classrooms">For classrooms</a>
+          <a href="#teams">For teams</a>
           <a href="#open-source">Open source</a>
         </nav>
         <div className="lp-nav-cta">
@@ -246,20 +246,20 @@ export default function Landing() {
           <p className="lp-sub">Paid models such as Claude and GPT work too, but you never need them.</p>
         </section>
 
-        <section id="classrooms" className="lp-section lp-split">
+        <section id="teams" className="lp-section lp-split">
           <div>
-            <h2 className="lp-h2">Ready for a classroom.</h2>
+            <h2 className="lp-h2">Ready to share with anyone.</h2>
             <ul className="lp-checks">
-              <li>Students join with your college email domain and a join code you share as a link.</li>
-              <li>Daily question limits per student, so a free AI quota lasts all term.</li>
-              <li>Each student sees only their own questions.</li>
-              <li>Corrections from students are reviewed before they count.</li>
+              <li>People sign up with email or Google. Optionally limit sign-up to your domain or an invite link.</li>
+              <li>Daily question limits per person, so a free AI quota lasts.</li>
+              <li>Everyone sees only their own questions.</li>
+              <li>Corrections from users are reviewed before they count.</li>
               <li>Every admin action is in an audit log.</li>
             </ul>
           </div>
           <div className="lp-join">
-            <div className="lp-join-label">Join code</div>
-            <div className="lp-join-code">CS101-K7Q2</div>
+            <div className="lp-join-label">Invite code</div>
+            <div className="lp-join-code">TEAM-K7Q2</div>
             <div className="lp-join-meter">
               <span>Questions today</span>
               <span>12 / 30</span>

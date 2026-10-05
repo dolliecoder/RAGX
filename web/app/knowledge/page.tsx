@@ -325,7 +325,7 @@ export default function KnowledgePage() {
               }}
               aria-label="who can ask this knowledge base"
             >
-              <option value="all">all students</option>
+              <option value="all">everyone signed in</option>
               <option value="admins">admins only (draft)</option>
             </select>
           </label>

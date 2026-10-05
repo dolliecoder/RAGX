@@ -28,7 +28,7 @@ function Bars({ days }: { days: UsageStats["days"] }) {
         return (
           <g key={d.day}>
             <rect x={x} y={h - bh} width={bw} height={Math.max(1, bh)} rx={3} fill="var(--accent)" opacity={0.85}>
-              <title>{`${d.day}: ${d.questions} questions, ${d.active_users} students`}</title>
+              <title>{`${d.day}: ${d.questions} questions, ${d.active_users} people`}</title>
             </rect>
             {(i % Math.ceil(days.length / 7) === 0 || i === days.length - 1) && (
               <text x={x} y={h + 14}>
@@ -51,7 +51,7 @@ function Overview() {
     <>
       <div className="grid k4">
         <Tile label="Accounts" value={data.users.total} />
-        <Tile label="Active today" value={data.users.active_today} hint="students who asked something" />
+        <Tile label="Active today" value={data.users.active_today} hint="people who asked something" />
         <Tile
           label="Questions today"
           value={cap ? `${data.today.questions}/${cap}` : data.today.questions}
@@ -132,11 +132,11 @@ function AccessForm() {
         <div className="stack">
           <label className="row">
             <input type="checkbox" checked={p.signup_enabled} onChange={(e) => setP({ ...p, signup_enabled: e.target.checked })} />
-            Students can create their own accounts
+            Anyone can create an account (sign-up open)
           </label>
           <label className="field">
             Allowed email domains (empty = any email)
-            <input value={domains} onChange={(e) => setDomains(e.target.value)} placeholder="yourcollege.edu" />
+            <input value={domains} onChange={(e) => setDomains(e.target.value)} placeholder="optional, e.g. example.org" />
           </label>
           <label className="field">
             Join code (empty = not required)
@@ -149,7 +149,7 @@ function AccessForm() {
           </label>
           {invite && (
             <div className="small">
-              Invite link for students (save first):{" "}
+              Invite link (save first):{" "}
               <button
                 type="button"
                 className="sm"
@@ -172,11 +172,11 @@ function AccessForm() {
               disabled={!emailOn}
               onChange={(e) => setP({ ...p, require_email_verification: e.target.checked })}
             />
-            Students must confirm their email before asking
+            Members must confirm their email before asking
           </label>
           <p className="faint small">
             {emailOn
-              ? "Email is set up: students can reset their own passwords and confirm their address, which makes the domain rule trustworthy."
+              ? "Email is set up: people can reset their own passwords and confirm their address, which makes the domain rule trustworthy."
               : "Email is not set up (see SMTP settings in .env), so addresses are not verified: the join code is what keeps outsiders out. Change it every term."}
           </p>
         </div>
@@ -273,7 +273,7 @@ function UserRow({ u, plans, me, onChange, onSecret }: { u: User; plans: string[
       </td>
       <td>
         <select value={u.role} disabled={busy || u.id === me} onChange={(e) => void patch({ role: e.target.value })} aria-label="role">
-          <option value="user">student</option>
+          <option value="user">member</option>
           <option value="admin">admin</option>
         </select>
       </td>
@@ -375,10 +375,10 @@ function UserList() {
         <input placeholder="Search name or email" value={q} onChange={(e) => setQ(e.target.value)} aria-label="search users" />
       </div>
       <form className="row" onSubmit={create} style={{ marginBottom: 12 }}>
-        <input placeholder="email@college.edu" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} aria-label="new user email" />
+        <input placeholder="name@example.com" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} aria-label="new user email" />
         <input placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} aria-label="new user name" />
         <select value={role} onChange={(e) => setRole(e.target.value)} aria-label="new user role">
-          <option value="user">student</option>
+          <option value="user">member</option>
           <option value="admin">admin</option>
         </select>
         <button className="primary">Add account</button>
