@@ -9,7 +9,7 @@ import type { AuthOptions, User } from "@/lib/types";
 
 function safeNext(next: string | null): string {
   // only allow same-site paths (no protocol-relative or absolute URLs)
-  return next && next.startsWith("/") && !next.startsWith("//") ? next : "/";
+  return next && next.startsWith("/") && !next.startsWith("//") && next !== "/" ? next : "/ask";
 }
 
 function LoginForm() {
@@ -43,9 +43,9 @@ function LoginForm() {
 
   return (
     <div className="card auth-card">
-      <div className="brand" style={{ padding: 0, marginBottom: 16 }}>
+      <Link href="/" className="brand brand-link" title="RAGX home" style={{ padding: 0, marginBottom: 16 }}>
         <span className="brand-mark">RX</span> RAGX
-      </div>
+      </Link>
       <h1>Sign in</h1>
       <p className="muted">Ask questions about your course material and get answers with sources.</p>
       <form onSubmit={submit}>
@@ -64,10 +64,16 @@ function LoginForm() {
       </form>
       {opts?.signup_enabled !== false && (
         <p className="small muted mt">
-          New here? <Link href={`/signup${next !== "/" ? `?next=${encodeURIComponent(next)}` : ""}`}>Create an account</Link>
+          New here? <Link href={`/signup${next !== "/ask" ? `?next=${encodeURIComponent(next)}` : ""}`}>Create an account</Link>
         </p>
       )}
-      <p className="small faint">Forgot your password? Ask your administrator to reset it.</p>
+      {opts?.email_enabled ? (
+        <p className="small">
+          <Link href="/forgot">Forgot your password?</Link>
+        </p>
+      ) : (
+        <p className="small faint">Forgot your password? Ask your administrator to reset it.</p>
+      )}
       <p className="small faint">
         RAGX is free, open-source software (AGPL-3.0).{" "}
         <a href={SOURCE_URL} target="_blank" rel="noreferrer">

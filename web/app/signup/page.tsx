@@ -10,7 +10,7 @@ import type { AuthOptions, User } from "@/lib/types";
 function SignupForm() {
   const params = useSearchParams();
   const raw = params.get("next");
-  const next = raw && raw.startsWith("/") && !raw.startsWith("//") ? raw : "/";
+  const next = raw && raw.startsWith("/") && !raw.startsWith("//") && raw !== "/" ? raw : "/ask";
   const [opts, setOpts] = useState<AuthOptions | null>(null);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -55,9 +55,9 @@ function SignupForm() {
 
   return (
     <div className="card auth-card">
-      <div className="brand" style={{ padding: 0, marginBottom: 16 }}>
+      <Link href="/" className="brand brand-link" title="RAGX home" style={{ padding: 0, marginBottom: 16 }}>
         <span className="brand-mark">RX</span> RAGX
-      </div>
+      </Link>
       <h1>Create your account</h1>
       <p className="muted">{domainHint ? `Use your college email (${domainHint}).` : "Use your college email."}</p>
       <form onSubmit={submit}>
