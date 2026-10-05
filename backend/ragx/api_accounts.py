@@ -10,10 +10,16 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select, update
 
 from . import limits as usage_limits
+from . import mailer
 from .auth import (
     SESSION_COOKIE,
+    AuthError,
     Principal,
     authenticate,
+    consume_email_token,
+    create_email_token,
+    normalize_email,
+    rate_guard,
     create_session,
     create_user,
     end_all_sessions,
@@ -49,6 +55,7 @@ def user_out(s, u: User, with_usage: bool = True) -> dict[str, Any]:
         "daily_limit_override": u.daily_limit_override,
         "active": u.active,
         "must_change_password": u.must_change_password,
+        "email_verified": u.email_verified,
         "created_at": _dt(u.created_at),
         "last_login_at": _dt(u.last_login_at),
         "last_seen_at": _dt(u.last_seen_at),
@@ -90,7 +97,16 @@ def auth_options() -> dict[str, Any]:
             "signup_enabled": pol.signup_enabled,
             "allowed_email_domains": pol.allowed_email_domains,
             "requires_join_code": bool(pol.join_code),
+            "email_enabled": mailer.enabled(),
+            "require_email_verification": pol.require_email_verification and mailer.enabled(),
         }
+
+
+def verification_blocks(s, user: User) -> bool:
+    """True if this user must confirm their email before using the service."""
+    if user.role == "admin" or user.email_verified or not mailer.enabled():
+        return False
+    return load_policy(s).require_email_verification
 
 
 class SignupIn(BaseModel):
@@ -109,9 +125,12 @@ class LoginIn(BaseModel):
 @router.post("/api/auth/signup", status_code=201)
 def auth_signup(body: SignupIn, request: Request, response: Response) -> dict[str, Any]:
     _require_csrf(request)
+    rate_guard.hit(f"signup:{client_ip(request)}", 10, 3600, "Too many sign-ups from your network. Try again later.")
     with session_scope() as s:
         user = signup(s, email=body.email, password=body.password, name=body.name, join_code=body.join_code)
         user.last_login_at = user.created_at
+        if mailer.enabled() and not user.email_verified:
+            mailer.send_verification(user.email, create_email_token(s, user, "verify"))
         token = create_session(s, user, ip=client_ip(request), user_agent=_ua(request))
         audit(s, user.email, "auth.signup", user.id, role=user.role)
         _set_session_cookie(response, token)
@@ -174,6 +193,85 @@ def change_password(body: PasswordIn, request: Request, response: Response, p: P
         return {"ok": True}
 
 
+class TokenIn(BaseModel):
+    token: str = Field(max_length=200)
+
+
+class ForgotIn(BaseModel):
+    email: str = Field(max_length=320)
+
+
+class ResetIn(BaseModel):
+    token: str = Field(max_length=200)
+    password: str = Field(max_length=256)
+
+
+@router.post("/api/auth/verify")
+def verify_email(body: TokenIn, request: Request) -> dict[str, Any]:
+    _require_csrf(request)
+    rate_guard.hit(f"verify-ip:{client_ip(request)}", 30, 3600, "Too many attempts. Try again later.")
+    with session_scope() as s:
+        user = consume_email_token(s, body.token, "verify")
+        user.email_verified = True
+        audit(s, user.email, "auth.email_verified", user.id)
+        return {"ok": True, "email": user.email}
+
+
+@router.post("/api/auth/resend-verification")
+def resend_verification(p: Principal = signed_in) -> dict[str, Any]:
+    if not mailer.enabled():
+        raise HTTPException(409, "Email is not set up on this server.")
+    if p.user_id is None:
+        raise HTTPException(400, "The service key has no email address.")
+    with session_scope() as s:
+        user = s.get(User, p.user_id)
+        if user.email_verified:
+            return {"ok": True, "already_verified": True}
+        rate_guard.hit(
+            f"verify:{p.user_id}", 3, 3600, "We already sent a few emails. Check your inbox and spam folder, or try again in an hour."
+        )
+        if not mailer.send_verification(user.email, create_email_token(s, user, "verify")):
+            raise HTTPException(502, "The email could not be sent. Please try again later.")
+        return {"ok": True}
+
+
+@router.post("/api/auth/forgot")
+def forgot_password(body: ForgotIn, request: Request) -> dict[str, Any]:
+    """Always answers the same way, so it cannot reveal who has an account."""
+    _require_csrf(request)
+    if not mailer.enabled():
+        raise HTTPException(409, "Password reset by email is not set up here. Ask your administrator to reset it.")
+    rate_guard.hit(f"forgot-ip:{client_ip(request)}", 10, 3600, "Too many requests. Try again later.")
+    try:
+        email = normalize_email(body.email)
+        rate_guard.hit(f"forgot:{email}", 3, 3600, "")
+    except AuthError:
+        return {"ok": True}  # invalid address or flood for one address: same answer
+    with session_scope() as s:
+        user = s.scalar(select(User).where(User.email == email))
+        if user is not None and user.active:
+            mailer.send_reset(user.email, create_email_token(s, user, "reset"))
+            audit(s, user.email, "auth.reset_requested", user.id)
+    return {"ok": True}
+
+
+@router.post("/api/auth/reset")
+def reset_password(body: ResetIn, request: Request, response: Response) -> dict[str, Any]:
+    _require_csrf(request)
+    rate_guard.hit(f"reset-ip:{client_ip(request)}", 20, 3600, "Too many attempts. Try again later.")
+    with session_scope() as s:
+        validate_password(body.password)
+        user = consume_email_token(s, body.token, "reset")
+        user.password_hash = hash_password(body.password)
+        user.must_change_password = False
+        user.email_verified = True  # they proved they can read this inbox
+        end_all_sessions(s, user.id)
+        token = create_session(s, user, ip=client_ip(request), user_agent=_ua(request))
+        audit(s, user.email, "auth.password_reset", user.id)
+        _set_session_cookie(response, token)
+        return {"user": user_out(s, user)}
+
+
 # ==================================================================== users
 class UserCreate(BaseModel):
     email: str = Field(max_length=320)
@@ -208,7 +306,12 @@ def admin_create_user(body: UserCreate, p: Principal = api) -> dict[str, Any]:
             raise HTTPException(422, f"Unknown plan '{body.plan}'.")
         user, password = create_user(s, email=body.email, name=body.name, role=body.role, plan=body.plan)
         audit(s, p.email, "user.create", user.id, email=user.email, role=user.role)
-        return {"user": user_out(s, user), "temporary_password": password}
+        if mailer.enabled() and mailer.send_invite(user.email, create_email_token(s, user, "invite"), p.email):
+            # the person sets their own password from the link: no shared secret
+            user.password_hash = hash_password(temp_password())
+            user.must_change_password = False
+            return {"user": user_out(s, user), "invite_sent": True}
+        return {"user": user_out(s, user), "temporary_password": password, "invite_sent": False}
 
 
 def _last_admin_guard(s, user: User) -> None:
@@ -247,12 +350,20 @@ def admin_update_user(user_id: str, body: UserPatch, p: Principal = api) -> dict
         return user_out(s, user)
 
 
+class AdminResetIn(BaseModel):
+    method: Literal["email", "temporary"] = "email"
+
+
 @router.post("/api/users/{user_id}/reset-password")
-def admin_reset_password(user_id: str, p: Principal = api) -> dict[str, Any]:
+def admin_reset_password(user_id: str, body: AdminResetIn | None = None, p: Principal = api) -> dict[str, Any]:
+    method = body.method if body else "email"
     with session_scope() as s:
         user = s.get(User, user_id)
         if user is None:
             raise HTTPException(404, "user not found")
+        if method == "email" and mailer.enabled() and mailer.send_reset(user.email, create_email_token(s, user, "reset")):
+            audit(s, p.email, "user.reset_link_sent", user.id, email=user.email)
+            return {"email_sent": True}
         password = temp_password()
         user.password_hash = hash_password(password)
         user.must_change_password = True
