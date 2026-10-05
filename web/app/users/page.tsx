@@ -5,7 +5,7 @@ import { useAuth } from "@/components/shell";
 import { Badge, Empty, ErrorBox, PageHead, Spinner, Tile, ago } from "@/components/ui";
 import { api, post } from "@/lib/api";
 import { useFetch } from "@/lib/hooks";
-import type { AccessPolicy, PlanLimits, User, UsageStats } from "@/lib/types";
+import type { AccessPolicy, AuthOptions, PlanLimits, User, UsageStats } from "@/lib/types";
 
 function randomCode() {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -89,6 +89,8 @@ function Overview() {
 
 function AccessForm() {
   const pol = useFetch<AccessPolicy>("/access");
+  const opts = useFetch<AuthOptions>("/auth/options");
+  const emailOn = !!opts.data?.email_enabled;
   const [p, setP] = useState<AccessPolicy | null>(null);
   const [domains, setDomains] = useState("");
   const [err, setErr] = useState<string | null>(null);
@@ -163,8 +165,19 @@ function AccessForm() {
               <div className="faint truncate">{invite}</div>
             </div>
           )}
+          <label className="row">
+            <input
+              type="checkbox"
+              checked={p.require_email_verification}
+              disabled={!emailOn}
+              onChange={(e) => setP({ ...p, require_email_verification: e.target.checked })}
+            />
+            Students must confirm their email before asking
+          </label>
           <p className="faint small">
-            Emails are not verified yet, so the join code is what really keeps outsiders out. Change it every term.
+            {emailOn
+              ? "Email is set up: students can reset their own passwords and confirm their address, which makes the domain rule trustworthy."
+              : "Email is not set up (see SMTP settings in .env), so addresses are not verified: the join code is what keeps outsiders out. Change it every term."}
           </p>
         </div>
         <div className="stack">
@@ -180,6 +193,7 @@ function AccessForm() {
               ))}
             </select>
           </label>
+          <div className="table-wrap">
           <table className="t small">
             <thead>
               <tr>
@@ -205,6 +219,7 @@ function AccessForm() {
               ))}
             </tbody>
           </table>
+          </div>
           <p className="faint small">0 questions per day = unlimited. Administrators are never limited.</p>
         </div>
       </div>
@@ -234,9 +249,9 @@ function UserRow({ u, plans, me, onChange, onSecret }: { u: User; plans: string[
     }
   };
   const reset = async () => {
-    if (!window.confirm(`Reset the password for ${u.email}? They will be signed out.`)) return;
-    const r = await post<{ temporary_password: string }>(`/users/${u.id}/reset-password`);
-    onSecret(`Temporary password for ${u.email}: ${r.temporary_password}`);
+    if (!window.confirm(`Reset the password for ${u.email}?`)) return;
+    const r = await post<{ temporary_password?: string; email_sent?: boolean }>(`/users/${u.id}/reset-password`);
+    onSecret(r.email_sent ? `A password reset link was emailed to ${u.email}.` : `Temporary password for ${u.email}: ${r.temporary_password}`);
   };
   const remove = async () => {
     if (!window.confirm(`Delete ${u.email}? Their questions are kept anonymously.`)) return;
@@ -254,6 +269,7 @@ function UserRow({ u, plans, me, onChange, onSecret }: { u: User; plans: string[
         <div>{u.name || "–"}</div>
         <div className="faint small">{u.email}</div>
         {u.must_change_password && <Badge value="temporary password" tone="warn" />}
+        {!u.email_verified && <Badge value="email not confirmed" />}
       </td>
       <td>
         <select value={u.role} disabled={busy || u.id === me} onChange={(e) => void patch({ role: e.target.value })} aria-label="role">
@@ -337,8 +353,12 @@ function UserList() {
     e.preventDefault();
     setErr(null);
     try {
-      const r = await post<{ user: User; temporary_password: string }>("/users", { email, name, role });
-      setSecret(`Account created for ${r.user.email}. Temporary password: ${r.temporary_password}`);
+      const r = await post<{ user: User; temporary_password?: string; invite_sent: boolean }>("/users", { email, name, role });
+      setSecret(
+        r.invite_sent
+          ? `Invitation emailed to ${r.user.email}. They choose their own password from the link.`
+          : `Account created for ${r.user.email}. Temporary password: ${r.temporary_password}`,
+      );
       setEmail("");
       setName("");
       void users.reload();
@@ -366,7 +386,8 @@ function UserList() {
       <ErrorBox error={err ?? users.error} />
       {secret && (
         <div className="note-box small" style={{ marginBottom: 12 }}>
-          <span className="secret">{secret}</span> — share it privately; it is shown only once and must be changed at first sign-in.{" "}
+          <span className="secret">{secret}</span>
+          {secret.startsWith("Temporary") || secret.includes("Temporary password") ? " — share it privately; it is shown only once and must be changed at first sign-in. " : " "}
           <button className="sm ghost" onClick={() => setSecret(null)}>
             dismiss
           </button>
