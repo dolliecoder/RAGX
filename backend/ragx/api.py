@@ -417,6 +417,14 @@ class QueryIn(BaseModel):
 def query(kb_id: str, body: QueryIn, p: Principal = signed_in) -> dict[str, Any]:
     with session_scope() as s:
         kb = _kb(s, kb_id, p)
+        if p.user_id:
+            from .api_accounts import verification_blocks
+
+            u = s.get(User, p.user_id)
+            if u is not None and verification_blocks(s, u):
+                raise HTTPException(
+                    403, "Please confirm your email address first: open the link we sent you, or resend it from your account page."
+                )
         with usage_limits.reserve(s, p, deep=body.mode == "deep") as can_go_deep:
             version, cfg = select_config(s)
             eng = QueryEngine(s, kb.id, cfg, version)
