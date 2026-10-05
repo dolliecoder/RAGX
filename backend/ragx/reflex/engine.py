@@ -12,6 +12,7 @@ Every step is recorded in the trace; heal outcomes are what the Repair loop lear
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -32,6 +33,18 @@ from ..util import run_parallel
 log = logging.getLogger("ragx.reflex")
 
 GRADE_BATCH = 10
+
+_SMALL_TALK = re.compile(
+    r"^\s*(hi|hello|hey|hiya|yo|thanks|thank you|thx|ty|cheers|bye|goodbye|see you|good (morning|afternoon|evening|night)|"
+    r"how are you|ok|okay|cool|great|nice|got it|you'?re welcome|who are you|what can you do|help)\b[\s!.,?:)]*"
+    r"(there|again|so much|a lot|ragx|bot)?[\s!.,?:)]*$",
+    re.IGNORECASE,
+)
+
+
+def is_small_talk(query: str) -> bool:
+    """Greetings, thanks and similar: the only messages allowed to skip retrieval."""
+    return bool(_SMALL_TALK.match(query.strip())) and len(query) <= 60
 
 
 class TraceRecorder:
@@ -204,7 +217,14 @@ class QueryEngine:
             }
         except (ProviderError, ValueError, TypeError, AttributeError) as e:
             gate["reason"] = f"gate unavailable ({type(e).__name__}); defaulting to retrieval"
-        if gate["retrieval_need"] < self.cfg.gate_threshold:
+        wants_direct = gate["retrieval_need"] < self.cfg.gate_threshold
+        if wants_direct and not is_small_talk(query):
+            # Never trust the model alone to skip the documents: a weak or confused gate
+            # would answer factual questions from memory, unverified. Only obvious small
+            # talk may bypass retrieval.
+            gate["overridden"] = "gate skipped retrieval for a real question; retrieving anyway"
+            wants_direct = False
+        if wants_direct:
             route = "direct"
         elif gate["complexity"] == "research" and opts.allow_escalation and not opts.is_eval:
             route = "deep"
