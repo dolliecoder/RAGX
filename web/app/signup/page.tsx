@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import { GoogleButton, OrDivider } from "@/components/google";
 import { ErrorBox, Spinner } from "@/components/ui";
 import { api, post } from "@/lib/api";
 import type { AuthOptions, User } from "@/lib/types";
@@ -59,7 +60,21 @@ function SignupForm() {
         <span className="brand-mark">RX</span> RAGX
       </Link>
       <h1>Create your account</h1>
-      <p className="muted">{domainHint ? `Use your college email (${domainHint}).` : "Use your college email."}</p>
+      <p className="muted">{domainHint ? `Sign up with an email address ending in ${domainHint}.` : "Free. All you need is an email address."}</p>
+      {opts?.google_enabled && (
+        <>
+          {opts.requires_join_code && (
+            <label className="field" style={{ marginTop: 16 }}>
+              Join code (needed for Google sign-up too)
+              <input value={code} onChange={(e) => setCode(e.target.value)} autoComplete="off" />
+            </label>
+          )}
+          <div style={{ marginTop: 16 }}>
+            <GoogleButton next={next} code={code} />
+          </div>
+          <OrDivider />
+        </>
+      )}
       <form onSubmit={submit}>
         <label className="field">
           Full name
@@ -67,15 +82,15 @@ function SignupForm() {
         </label>
         <label className="field">
           Email
-          <input type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder={domains[0] ? `you@${domains[0]}` : "you@college.edu"} />
+          <input type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder={domains[0] ? `you@${domains[0]}` : "you@example.com"} />
         </label>
         <label className="field">
           Password (at least 8 characters, letters and numbers)
           <input type="password" autoComplete="new-password" required value={password} onChange={(e) => setPassword(e.target.value)} />
         </label>
-        {opts?.requires_join_code && (
+        {opts?.requires_join_code && !opts.google_enabled && (
           <label className="field">
-            Join code (from your teacher)
+            Join code (from whoever invited you)
             <input required value={code} onChange={(e) => setCode(e.target.value)} autoComplete="off" />
           </label>
         )}

@@ -244,3 +244,14 @@ details > summary { cursor: pointer; color: var(--muted); }
 @media (max-width: 860px) {
   .user-box { margin-top: 0; border-top: none; padding: 0; flex-direction: row; align-items: center; }
 }
+
+/* ------------------------------------------------------------ Google sign-in */
+.google-btn {
+  display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%;
+  padding: 9px 12px; border-radius: 8px; border: 1px solid #dadce0; background: #ffffff; color: #1f1f1f;
+  font: 500 14.5px/1.2 var(--sans); text-decoration: none; margin-top: 16px;
+}
+.google-btn:hover { background: #f8f9fa; text-decoration: none; box-shadow: 0 1px 3px rgba(60, 64, 67, 0.15); }
+.google-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.or-divider { display: flex; align-items: center; gap: 12px; color: var(--faint); font-size: 12px; margin: 16px 0 0; }
+.or-divider::before, .or-divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }

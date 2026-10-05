@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import { GoogleButton, OrDivider } from "@/components/google";
 import { ErrorBox, Spinner } from "@/components/ui";
 import { SOURCE_URL, api, post } from "@/lib/api";
 import type { AuthOptions, User } from "@/lib/types";
@@ -17,7 +18,7 @@ function LoginForm() {
   const next = safeNext(params.get("next"));
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(params.get("error"));
   const [busy, setBusy] = useState(false);
   const [opts, setOpts] = useState<AuthOptions | null>(null);
 
@@ -47,7 +48,13 @@ function LoginForm() {
         <span className="brand-mark">RX</span> RAGX
       </Link>
       <h1>Sign in</h1>
-      <p className="muted">Ask questions about your course material and get answers with sources.</p>
+      <p className="muted">Ask questions about your documents and get answers you can check.</p>
+      {opts?.google_enabled && (
+        <>
+          <GoogleButton next={next} />
+          <OrDivider />
+        </>
+      )}
       <form onSubmit={submit}>
         <label className="field">
           Email
