@@ -261,6 +261,8 @@ export type User = {
   active: boolean;
   must_change_password: boolean;
   email_verified: boolean;
+  has_password: boolean;
+  google_linked: boolean;
   created_at: string;
   last_login_at: string | null;
   last_seen_at: string | null;
@@ -285,6 +287,7 @@ export type AuthOptions = {
   requires_join_code: boolean;
   email_enabled: boolean;
   require_email_verification: boolean;
+  google_enabled: boolean;
 };
 
 export type UsageStats = {

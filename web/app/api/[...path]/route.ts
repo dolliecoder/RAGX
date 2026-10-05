@@ -25,8 +25,10 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
   }
   const out = new Headers({ "content-type": upstream.headers.get("content-type") ?? "application/json" });
   for (const c of upstream.headers.getSetCookie()) out.append("set-cookie", c);
-  const retry = upstream.headers.get("retry-after");
-  if (retry) out.set("retry-after", retry);
+  for (const h of ["retry-after", "location"]) {
+    const v = upstream.headers.get(h);
+    if (v) out.set(h, v); // location: OAuth redirects (Google sign-in)
+  }
   return new Response(upstream.body, { status: upstream.status, headers: out });
 }
 
