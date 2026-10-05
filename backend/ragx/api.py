@@ -46,6 +46,7 @@ from .reflex.engine import QueryEngine, QueryOptions
 from .signals import record_feedback
 from .tasks import Scheduler
 from .api_accounts import router as accounts_router
+from .oauth_google import router as google_router
 
 log = logging.getLogger("ragx.api")
 _scheduler: Scheduler | None = None
@@ -76,6 +77,7 @@ app.add_middleware(
 
 
 app.include_router(accounts_router)
+app.include_router(google_router)
 
 
 @app.exception_handler(AuthError)
