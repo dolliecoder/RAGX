@@ -22,7 +22,7 @@ os.environ.update(
         "RAGX_WEB_SEARCH_PROVIDER": "none",
     }
 )
-for k in ("RAGX_ANTHROPIC_API_KEY", "RAGX_OPENAI_API_KEY", "RAGX_GEMINI_API_KEY", "RAGX_API_KEY", "RAGX_ADMIN_EMAILS"):
+for k in ("RAGX_ANTHROPIC_API_KEY", "RAGX_OPENAI_API_KEY", "RAGX_GEMINI_API_KEY", "RAGX_API_KEY", "RAGX_ADMIN_EMAILS", "RAGX_SMTP_HOST"):
     os.environ.pop(k, None)
 
 
@@ -51,6 +51,11 @@ def env(tmp_path, monkeypatch):
 
     limits.live.reset()
     login_guard.reset()
+    from ragx import mailer
+    from ragx.auth import rate_guard
+
+    rate_guard.reset()
+    mailer.outbox.clear()
     from ragx.bootstrap import init_app
 
     init_app()
