@@ -1,0 +1,58 @@
+# Production add-on: HTTPS with Caddy + nightly database backups.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Needs in .env: RAGX_DOMAIN (e.g. ragx.yourcollege.edu, its DNS pointing to this
+# server), a strong POSTGRES_PASSWORD and RAGX_ADMIN_EMAILS. See DEPLOY.md.
+
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      RAGX_DOMAIN: ${RAGX_DOMAIN:?set RAGX_DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+
+  api:
+    environment:
+      RAGX_COOKIE_SECURE: "true"
+      RAGX_APP_URL: https://${RAGX_DOMAIN}
+      RAGX_CORS_ORIGINS: https://${RAGX_DOMAIN}
+
+  web:
+    environment:
+      NEXT_PUBLIC_RAGX_SOURCE_URL: ${RAGX_SOURCE_URL:-https://github.com/dolliecoder/RAGX}
+
+  backup:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-ragx}
+    volumes:
+      - ./backups:/backups
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "nightly backups -> ./backups (kept 14 days)"
+        while true; do
+          f=/backups/ragx-$$(date +%F-%H%M).sql.gz
+          if pg_dump -h db -U ragx ragx | gzip > "$$f.tmp"; then mv "$$f.tmp" "$$f"; echo "backup written: $$f"; else rm -f "$$f.tmp"; echo "BACKUP FAILED"; fi
+          find /backups -name 'ragx-*.sql.gz' -mtime +14 -delete
+          sleep 86400
+        done
+
+volumes:
+  caddy_data:
+  caddy_config:

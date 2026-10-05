@@ -1,0 +1,21 @@
+# Caddy gets and renews a free HTTPS certificate for RAGX_DOMAIN automatically.
+{$RAGX_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+
+	# Uploads can be large (50 MB per file).
+	request_body {
+		max_size 200MB
+	}
+
+	# Everything goes through the web app; it proxies /api to the backend internally.
+	reverse_proxy web:3000
+}
