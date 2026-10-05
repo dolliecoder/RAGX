@@ -136,8 +136,8 @@ def test_bad_fix_is_rejected_by_eval_gate(env, docs_dir):
         d = Diagnosis(kb_id=kb, root_cause="gate_error", target="gate:threshold", summary="test", evidence={}, trace_ids=[])
         s.add(d)
         s.flush()
-        # threshold of 0.95 routes everything to 'direct' -> no answers from the KB
-        f = Fix(kb_id=kb, diagnosis_id=d.id, kind="gate_threshold", risk="medium", params={"value": 0.95, "patch": {"set": {"gate_threshold": 0.95}}})
+        # a rule that drops every retrieved passage -> no answers from the KB
+        f = Fix(kb_id=kb, diagnosis_id=d.id, kind="gate_threshold", risk="medium", params={"patch": {"set": {"max_chunks_per_doc": 0}}})
         s.add(f)
         s.add(GoldenItem(kb_id=kb, question="How long do I have to request a refund on the Pro plan?", expected_answer="Within 30 days of purchase."))
         s.flush()
@@ -154,12 +154,12 @@ def test_medium_risk_canary_promote_and_rollback(env, docs_dir):
     from ragx.control import active_config, canary_version
     from ragx.repair.service import evaluate_canaries, process_fix
 
-    def new_fix(value):
+    def new_fix(value, patch=None):
         with session_scope() as s:
             d = Diagnosis(kb_id=kb, root_cause="gate_error", target=f"gate:{value}", summary="t", evidence={}, trace_ids=[])
             s.add(d)
             s.flush()
-            f = Fix(kb_id=kb, diagnosis_id=d.id, kind="gate_threshold", risk="medium", params={"value": value, "patch": {"set": {"gate_threshold": value}}})
+            f = Fix(kb_id=kb, diagnosis_id=d.id, kind="gate_threshold", risk="medium", params={"value": value, "patch": patch or {"set": {"gate_threshold": value}}})
             s.add(f)
             s.flush()
             return f.id
@@ -187,7 +187,7 @@ def test_medium_risk_canary_promote_and_rollback(env, docs_dir):
         assert s.get(Fix, fid).status == "applied"
 
     # now a canary that makes things worse gets rolled back automatically
-    fid2 = new_fix(0.99)  # everything becomes 'direct' -> nothing verified
+    fid2 = new_fix(0.99, {"set": {"max_chunks_per_doc": 0}})  # drops all evidence -> nothing verified
     with session_scope() as s:
         f = s.get(Fix, fid2)
         version, cfg = active_config(s)
