@@ -117,8 +117,9 @@ def normalize_email(email: str) -> str:
 
 
 # -------------------------------------------------------------------- signup
-def signup(session: Session, *, email: str, password: str, name: str = "", join_code: str = "") -> User:
-    email = normalize_email(email)
+def check_signup_allowed(session: Session, email: str, join_code: str = "") -> bool:
+    """Apply the access policy to a new account (password or Google). Returns
+    whether the address is a bootstrap admin; raises AuthError when not allowed."""
     policy = load_policy(session)
     is_admin = email in admin_emails()
     if not is_admin:
@@ -126,9 +127,22 @@ def signup(session: Session, *, email: str, password: str, name: str = "", join_
             raise AuthError("Sign-up is closed. Ask your administrator for an account.", 403)
         domains = [d.strip().lower().lstrip("@") for d in policy.allowed_email_domains if d.strip()]
         if domains and email.rsplit("@", 1)[1] not in domains:
-            raise AuthError(f"Use your college email ({', '.join('@' + d for d in domains)}).", 403)
+            raise AuthError(f"Sign-up is limited to email addresses ending in {', '.join('@' + d for d in domains)}.", 403)
         if policy.join_code and not hmac.compare_digest(join_code.strip(), policy.join_code):
             raise AuthError("The join code is not correct.", 403)
+    return is_admin
+
+
+UNUSABLE_PASSWORD_PREFIX = "!"  # accounts that only sign in with Google
+
+
+def has_password(user: User) -> bool:
+    return not user.password_hash.startswith(UNUSABLE_PASSWORD_PREFIX)
+
+
+def signup(session: Session, *, email: str, password: str, name: str = "", join_code: str = "") -> User:
+    email = normalize_email(email)
+    is_admin = check_signup_allowed(session, email, join_code)
     validate_password(password)
     if session.scalar(select(User).where(User.email == email)):
         raise AuthError("An account with this email already exists. Sign in instead.", 409)
@@ -137,10 +151,43 @@ def signup(session: Session, *, email: str, password: str, name: str = "", join_
         name=name.strip()[:200],
         password_hash=hash_password(password),
         role="admin" if is_admin else "user",
-        plan=policy.default_plan,
+        plan=load_policy(session).default_plan,
         email_verified=is_admin,  # bootstrap admins are trusted via server config
     )
     session.add(user)
+    session.flush()
+    return user
+
+
+def google_signin(session: Session, *, sub: str, email: str, name: str, join_code: str = "") -> User:
+    """Find or create the account for a verified Google identity."""
+    email = normalize_email(email)
+    user = session.scalar(select(User).where(User.google_sub == sub))
+    if user is None:
+        user = session.scalar(select(User).where(User.email == email))
+        if user is not None:
+            # Same address, and Google has verified that this person owns it: link.
+            user.google_sub = sub
+        else:
+            is_admin = check_signup_allowed(session, email, join_code)
+            user = User(
+                email=email,
+                name=name.strip()[:200],
+                password_hash=UNUSABLE_PASSWORD_PREFIX + secrets.token_urlsafe(24),
+                role="admin" if is_admin else "user",
+                plan=load_policy(session).default_plan,
+                google_sub=sub,
+                active=True,  # column defaults only apply on insert; checked below
+            )
+            session.add(user)
+    if not user.active:
+        raise AuthError("This account has been disabled. Contact your administrator.", 403)
+    user.email_verified = True  # Google verified the address
+    if not user.name and name:
+        user.name = name.strip()[:200]
+    if email in admin_emails() and user.role != "admin":
+        user.role = "admin"
+    user.last_login_at = utcnow()
     session.flush()
     return user
 
