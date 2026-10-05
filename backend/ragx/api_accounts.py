@@ -24,6 +24,7 @@ from .auth import (
     create_user,
     end_all_sessions,
     end_session,
+    has_password,
     hash_password,
     load_policy,
     save_policy,
@@ -56,6 +57,8 @@ def user_out(s, u: User, with_usage: bool = True) -> dict[str, Any]:
         "active": u.active,
         "must_change_password": u.must_change_password,
         "email_verified": u.email_verified,
+        "has_password": has_password(u),
+        "google_linked": bool(u.google_sub),
         "created_at": _dt(u.created_at),
         "last_login_at": _dt(u.last_login_at),
         "last_seen_at": _dt(u.last_seen_at),
@@ -98,8 +101,14 @@ def auth_options() -> dict[str, Any]:
             "allowed_email_domains": pol.allowed_email_domains,
             "requires_join_code": bool(pol.join_code),
             "email_enabled": mailer.enabled(),
+            "google_enabled": _google_enabled(),
             "require_email_verification": pol.require_email_verification and mailer.enabled(),
         }
+
+
+def _google_enabled() -> bool:
+    st = get_settings()
+    return bool(st.google_client_id.strip() and st.google_client_secret.strip())
 
 
 def verification_blocks(s, user: User) -> bool:
@@ -171,7 +180,7 @@ def auth_me(p: Principal = signed_in) -> dict[str, Any]:
 
 
 class PasswordIn(BaseModel):
-    current_password: str = Field(max_length=256)
+    current_password: str = Field(default="", max_length=256)
     new_password: str = Field(max_length=256)
 
 
@@ -181,7 +190,8 @@ def change_password(body: PasswordIn, request: Request, response: Response, p: P
         raise HTTPException(400, "The service key has no password.")
     with session_scope() as s:
         user = s.get(User, p.user_id)
-        if not verify_password(body.current_password, user.password_hash):
+        # Google-only accounts have no password yet: they may set one directly.
+        if has_password(user) and not verify_password(body.current_password, user.password_hash):
             raise HTTPException(400, "Your current password is not correct.")
         validate_password(body.new_password)
         user.password_hash = hash_password(body.new_password)
