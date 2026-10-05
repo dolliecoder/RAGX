@@ -9,7 +9,8 @@ RAGX is a free, open-source question-answering platform for your own documents (
 - **Heals while answering.** When the first search misses, it rewrites the query, looks further, and tries exact matches before giving up.
 - **Repairs itself over time.** In the background it works out *why* a question failed and proposes a fix. It tests the fix before applying it, and rolls it back if things get worse. Every fixed failure becomes a permanent regression test.
 - **Runs on free models.** Gemini's free tier, Groq, OpenRouter's free models, or fully local open-source models with Ollama. No credit card needed.
-- **Is ready for a classroom.** It has accounts, a join code for your class, per-student daily limits, and a private question history for each student.
+- **Is ready for a classroom.** It has accounts, a join code for your class, per-student daily limits, and a private question history for each student. Password reset and email confirmation work with any free email service.
+- **Deploys in one command.** HTTPS, nightly backups and a step-by-step guide, including a free-forever server option. See [DEPLOY.md](DEPLOY.md).
 
 > **Status: early (v0.1).** The engine, self-repair loop, accounts and dashboard work and are covered by 60+ automated tests. It has not yet been used at scale; expect rough edges, and please report them.
 
@@ -44,6 +45,8 @@ You need [Docker Desktop](https://www.docker.com/products/docker-desktop/).
 5. **Open http://localhost:3000**, sign up with your admin email, and go to **Knowledge**. Create a knowledge base, add the source `/docs`, then ask a question on **Ask**.
 
 No key yet? It still starts, in **offline mode**. Everything works, but answers are simple extracts.
+
+**Put it online:** [DEPLOY.md](DEPLOY.md) walks through HTTPS, backups and a free server, step by step.
 
 ## Free model setups
 
@@ -105,6 +108,10 @@ Paid providers (Anthropic, OpenAI, LM Studio and vLLM through an OpenAI-compatib
   Admins are never limited, and questions that fail because of a provider outage aren't counted.
 - **Privacy:** students see only their own questions. Student "this is wrong" corrections wait for admin review before they're used as tests.
 - **Security:** scrypt password hashes, HttpOnly session cookies, CSRF protection, lockout after 5 failed sign-ins, an audit log of every admin action, and safe defaults for folder sources. See [SECURITY.md](SECURITY.md).
+- **Email (optional):** set the `RAGX_SMTP_*` values in `.env`, using Gmail with an app password, Brevo or Resend free tiers. This turns on:
+  - "forgot password" links
+  - invites, where people choose their own password from a link
+  - optional required email confirmation, which makes the email-domain rule trustworthy
 - **Locked out?** Run this on the server:
 
   ```bash
@@ -191,7 +198,7 @@ web/                                Next.js dashboard
 
 ## Known limits
 
-- No email verification or "forgot password" email yet; admins reset passwords from the Users page.
+- Without email settings, there is no self-service password reset; admins reset passwords from the Users page.
 - Semantic search runs in memory, which is fine up to a few hundred thousand passages; beyond that, add a pgvector HNSW index.
 - One organisation per install (no multi-tenancy yet).
 - Free tiers change their limits and model names often; `ragx models` and **Settings** help you keep up.
