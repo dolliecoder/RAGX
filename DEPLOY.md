@@ -1,6 +1,6 @@
-# Deploying RAGX for your class or team
+# Deploying RAGX
 
-This guide puts RAGX on the internet at your own address, for example `https://ragx.yourcollege.edu`, with HTTPS, nightly backups and accounts. It takes about 30 minutes. No programming is needed: you copy commands.
+This guide puts RAGX on the internet at your own address, for example `https://ragx.example.org`, with HTTPS, nightly backups and accounts. It takes about 30 minutes. No programming is needed: you copy commands.
 
 ## What you need
 
@@ -19,10 +19,10 @@ Create an **Ubuntu 24.04** server with your provider, and add your SSH key. Open
 
 ## 2. Point your address at the server
 
-Create a DNS **A record** for your address (e.g. `ragx.yourcollege.edu`) with the server's public IP. With DuckDNS, type the IP on the DuckDNS page. Wait until this shows the IP:
+Create a DNS **A record** for your address (e.g. `ragx.example.org`) with the server's public IP. With DuckDNS, type the IP on the DuckDNS page. Wait until this shows the IP:
 
 ```bash
-nslookup ragx.yourcollege.edu
+nslookup ragx.example.org
 ```
 
 ## 3. Install Docker and get RAGX
@@ -56,8 +56,8 @@ sudo iptables -I INPUT -p tcp -m multiport --dports 80,443 -j ACCEPT && sudo net
 Open it with `nano .env`. Set at least these values, then save with `Ctrl+O`, `Enter`, `Ctrl+X`:
 
 ```
-RAGX_DOMAIN=ragx.yourcollege.edu
-RAGX_ADMIN_EMAILS=you@yourcollege.edu
+RAGX_DOMAIN=ragx.example.org
+RAGX_ADMIN_EMAILS=you@example.org
 POSTGRES_PASSWORD=<a long random password>
 RAGX_GEMINI_API_KEY=<your free Gemini key>
 ```
@@ -72,6 +72,18 @@ RAGX_SMTP_PASSWORD=<16-character app password>
 RAGX_SMTP_FROM=RAGX <you@gmail.com>
 ```
 
+Optional **"Continue with Google"** (free):
+
+1. Open [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials).
+2. Create a project, set up the **OAuth consent screen** (External; app name RAGX), then **Create credentials → OAuth client ID → Web application**.
+3. Under **Authorized redirect URIs**, add `https://ragx.example.org/api/auth/google/callback`.
+4. Copy the two values into `.env`:
+
+```
+RAGX_GOOGLE_CLIENT_ID=<...>.apps.googleusercontent.com
+RAGX_GOOGLE_CLIENT_SECRET=<...>
+```
+
 To get a strong database password:
 
 ```bash
@@ -84,11 +96,11 @@ openssl rand -base64 24
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
-The first start takes a few minutes. Caddy gets a free HTTPS certificate automatically. Open `https://ragx.yourcollege.edu`:
+The first start takes a few minutes. Caddy gets a free HTTPS certificate automatically. Open `https://ragx.example.org`:
 
 1. **Sign up** with the email you put in `RAGX_ADMIN_EMAILS`. You become the administrator.
 2. Go to **Users → Access & limits**:
-   - set your college email domain
+   - optionally limit sign-up to your email domain
    - click **Generate** for a join code
    - optionally tick "Students must confirm their email" (needs email set up)
    - set a site-wide daily cap that fits your free model quota, e.g. 150 questions per day on the free Gemini tier
@@ -121,7 +133,7 @@ docker compose logs -f api
 **Locked out of the admin account:**
 
 ```bash
-docker compose exec api ragx admin reset-password you@yourcollege.edu
+docker compose exec api ragx admin reset-password you@example.org
 ```
 
 ## Using local open-source models on the server

@@ -9,7 +9,7 @@ RAGX is a free, open-source question-answering platform for your own documents (
 - **Heals while answering.** When the first search misses, it rewrites the query, looks further, and tries exact matches before giving up.
 - **Repairs itself over time.** In the background it works out *why* a question failed and proposes a fix. It tests the fix before applying it, and rolls it back if things get worse. Every fixed failure becomes a permanent regression test.
 - **Runs on free models.** Gemini's free tier, Groq, OpenRouter's free models, or fully local open-source models with Ollama. No credit card needed.
-- **Is ready for a classroom.** It has accounts, a join code for your class, per-student daily limits, and a private question history for each student. Password reset and email confirmation work with any free email service.
+- **Is ready to share.** People sign up with email or **Continue with Google**. You get per-person daily limits, optional invite codes or domain limits, and a private question history for each person. Password reset and email confirmation work with any free email service.
 - **Deploys in one command.** HTTPS, nightly backups and a step-by-step guide, including a free-forever server option. See [DEPLOY.md](DEPLOY.md).
 
 > **Status: early (v0.1).** The engine, self-repair loop, accounts and dashboard work and are covered by 60+ automated tests. It has not yet been used at scale; expect rough edges, and please report them.
