@@ -157,3 +157,24 @@ def test_deep_research_job(env, docs_dir):
         t = s.get(Trace, job.result["trace_id"])
         assert t.route == "deep"
         assert job.result["citations"]
+
+
+class _LazyGate(FakeProvider):
+    """A weak model that thinks nothing needs the documents."""
+
+    def _t_gate(self, p):
+        return {"retrieval_need": 0.0, "complexity": "simple", "freshness_need": 0.0, "reason": "lazy"}
+
+
+def test_weak_gate_cannot_skip_retrieval_for_real_questions(env, docs_dir):
+    kb, _ = make_kb(docs_dir)
+    set_config(long_context_max_tokens=0)
+    reg = Registry()
+    reg.chains["utility"] = [_LazyGate("lazy")]
+    set_registry(reg)
+    r = ask(kb, "How long do I have to request a refund on the Pro plan?")
+    assert r["route"] != "direct" and r["status"] == "verified"
+    assert "30 days" in r["answer"]
+    r = ask(kb, "Do you support Kubernetes autoscaling?")
+    assert r["route"] != "direct" and r["status"] == "failed"  # honest "not found", not a guess
+    assert ask(kb, "thanks!")["route"] == "direct"  # small talk may still skip retrieval
