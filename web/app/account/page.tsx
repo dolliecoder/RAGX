@@ -84,8 +84,10 @@ export default function AccountPage() {
                 </>
               )}
             </dd>
+            <dt>Sign-in</dt>
+            <dd>{[user.has_password && "email and password", user.google_linked && "Google"].filter(Boolean).join(" · ") || "–"}</dd>
             <dt>Role</dt>
-            <dd>{user.role === "admin" ? "Administrator" : "Student"}</dd>
+            <dd>{user.role === "admin" ? "Administrator" : "Member"}</dd>
             <dt>Plan</dt>
             <dd>{user.plan}</dd>
           </dl>
@@ -110,12 +112,17 @@ export default function AccountPage() {
           )}
         </div>
         <div className="card">
-          <h2>Change password</h2>
+          <h2>{user.has_password ? "Change password" : "Set a password"}</h2>
+          {!user.has_password && (
+            <p className="muted small">You sign in with Google. Optionally add a password to also sign in with your email.</p>
+          )}
           <form className="stack" onSubmit={change}>
-            <label className="field">
-              Current password
-              <input type="password" autoComplete="current-password" required value={current} onChange={(e) => setCurrent(e.target.value)} />
-            </label>
+            {user.has_password && (
+              <label className="field">
+                Current password
+                <input type="password" autoComplete="current-password" required value={current} onChange={(e) => setCurrent(e.target.value)} />
+              </label>
+            )}
             <label className="field">
               New password
               <input type="password" autoComplete="new-password" required value={next} onChange={(e) => setNext(e.target.value)} />
