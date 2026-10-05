@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from .config import AccessPolicy, get_settings
 from .db import utcnow
-from .models import AppSetting, AuthSession, User
+from .models import AppSetting, AuthSession, EmailToken, User
 
 SESSION_COOKIE = "ragx_session"
 POLICY_KEY = "access_policy"
@@ -138,13 +138,16 @@ def signup(session: Session, *, email: str, password: str, name: str = "", join_
         password_hash=hash_password(password),
         role="admin" if is_admin else "user",
         plan=policy.default_plan,
+        email_verified=is_admin,  # bootstrap admins are trusted via server config
     )
     session.add(user)
     session.flush()
     return user
 
 
-def create_user(session: Session, *, email: str, name: str = "", role: str = "user", plan: str | None = None, password: str | None = None) -> tuple[User, str]:
+def create_user(
+    session: Session, *, email: str, name: str = "", role: str = "user", plan: str | None = None, password: str | None = None
+) -> tuple[User, str]:
     """Admin-created account. Returns the user and its (temporary) password."""
     email = normalize_email(email)
     if session.scalar(select(User).where(User.email == email)):
@@ -159,6 +162,7 @@ def create_user(session: Session, *, email: str, name: str = "", role: str = "us
         role="admin" if role == "admin" else "user",
         plan=plan or load_policy(session).default_plan,
         must_change_password=password is None,
+        email_verified=True,  # an administrator vouched for this address
     )
     session.add(user)
     session.flush()
@@ -289,3 +293,56 @@ def principal_for(user: User, via: str) -> Principal:
 
 
 SERVICE_PRINCIPAL = Principal(None, "service", "admin", "pro", "service")
+
+
+# --------------------------------------------------------------- email tokens
+TOKEN_TTL = {"verify": timedelta(days=3), "reset": timedelta(hours=1), "invite": timedelta(days=7)}
+
+
+def create_email_token(session: Session, user: User, purpose: str) -> str:
+    """Issue a single-use link token; older unused tokens of the same purpose die."""
+    kind = "reset" if purpose == "invite" else purpose
+    session.execute(delete(EmailToken).where(EmailToken.user_id == user.id, EmailToken.purpose == kind, EmailToken.used_at.is_(None)))
+    token = secrets.token_urlsafe(32)
+    session.add(EmailToken(id=_token_id(token), user_id=user.id, purpose=kind, expires_at=utcnow() + TOKEN_TTL[purpose]))
+    return token
+
+
+def consume_email_token(session: Session, token: str, purpose: str) -> User:
+    bad = AuthError("This link is invalid or has expired. Request a new one.", 400)
+    if not token or len(token) > 200:
+        raise bad
+    row = session.get(EmailToken, _token_id(token))
+    if row is None or row.purpose != purpose or row.used_at is not None or _aware(row.expires_at) <= utcnow():
+        raise bad
+    user = session.get(User, row.user_id)
+    if user is None or not user.active:
+        raise bad
+    row.used_at = utcnow()
+    return user
+
+
+# ------------------------------------------------------------ abuse limiter
+class _RateGuard:
+    """Sliding-window limiter for anonymous endpoints (sign-up, password reset)."""
+
+    def __init__(self) -> None:
+        self.hits: dict[str, deque[float]] = defaultdict(deque)
+        self.lock = threading.Lock()
+
+    def hit(self, key: str, limit: int, window: int, message: str) -> None:
+        now = time.monotonic()
+        with self.lock:
+            q = self.hits[key]
+            while q and now - q[0] > window:
+                q.popleft()
+            if len(q) >= limit:
+                raise AuthError(message, 429)
+            q.append(now)
+
+    def reset(self) -> None:
+        with self.lock:
+            self.hits.clear()
+
+
+rate_guard = _RateGuard()
