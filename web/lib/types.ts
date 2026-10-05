@@ -260,6 +260,7 @@ export type User = {
   daily_limit_override: number | null;
   active: boolean;
   must_change_password: boolean;
+  email_verified: boolean;
   created_at: string;
   last_login_at: string | null;
   last_seen_at: string | null;
@@ -272,12 +273,19 @@ export type AccessPolicy = {
   signup_enabled: boolean;
   allowed_email_domains: string[];
   join_code: string;
+  require_email_verification: boolean;
   default_plan: string;
   plans: Record<string, PlanLimits>;
   global_daily_questions: number;
 };
 
-export type AuthOptions = { signup_enabled: boolean; allowed_email_domains: string[]; requires_join_code: boolean };
+export type AuthOptions = {
+  signup_enabled: boolean;
+  allowed_email_domains: string[];
+  requires_join_code: boolean;
+  email_enabled: boolean;
+  require_email_verification: boolean;
+};
 
 export type UsageStats = {
   days: { day: string; questions: number; deep: number; active_users: number; tokens_in: number; tokens_out: number }[];

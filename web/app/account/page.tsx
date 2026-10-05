@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAuth } from "@/components/shell";
 import { ErrorBox, PageHead, Spinner } from "@/components/ui";
-import { post } from "@/lib/api";
+import { api, post } from "@/lib/api";
+import type { AuthOptions } from "@/lib/types";
 
 export default function AccountPage() {
   const { user, refreshUser } = useAuth();
@@ -13,6 +14,10 @@ export default function AccountPage() {
   const [err, setErr] = useState<string | null>(null);
   const [ok, setOk] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [opts, setOpts] = useState<AuthOptions | null>(null);
+  useEffect(() => {
+    api<AuthOptions>("/auth/options").then(setOpts).catch(() => {});
+  }, []);
   if (!user) return null;
   const u = user.usage;
 
@@ -54,7 +59,31 @@ export default function AccountPage() {
             <dt>Name</dt>
             <dd>{user.name || "–"}</dd>
             <dt>Email</dt>
-            <dd>{user.email}</dd>
+            <dd>
+              {user.email}{" "}
+              {!opts?.email_enabled ? null : user.email_verified ? (
+                <span className="badge ok">confirmed</span>
+              ) : (
+                <>
+                  <span className="badge warn">not confirmed</span>{" "}
+                  <button
+                    className="sm"
+                    onClick={async () => {
+                      try {
+                        await post("/auth/resend-verification");
+                        setErr(null);
+                        setOk(false);
+                        window.alert("Confirmation email sent. Check your inbox and spam folder.");
+                      } catch (e) {
+                        window.alert((e as Error).message);
+                      }
+                    }}
+                  >
+                    Resend email
+                  </button>
+                </>
+              )}
+            </dd>
             <dt>Role</dt>
             <dd>{user.role === "admin" ? "Administrator" : "Student"}</dd>
             <dt>Plan</dt>
