@@ -30,9 +30,22 @@ class User(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    google_sub: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)  # Google account id
     created_at: Mapped[datetime] = _created()
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class OAuthState(Base):
+    """One pending "Continue with Google" attempt (10 minutes, single use)."""
+
+    __tablename__ = "oauth_states"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)  # sha256(state)
+    nonce: Mapped[str] = mapped_column(String(64))
+    verifier: Mapped[str] = mapped_column(String(128))  # PKCE code verifier
+    next_path: Mapped[str] = mapped_column(String(500), default="/ask")
+    join_code: Mapped[str] = mapped_column(String(200), default="")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class EmailToken(Base):

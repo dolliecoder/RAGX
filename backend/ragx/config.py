@@ -29,8 +29,13 @@ class Settings(BaseSettings):
     # Session cookie: set Secure when served over HTTPS (deployment).
     cookie_secure: bool = False
     session_days: int = 30
-    # Public address of the website, used in links inside emails.
+    # Public address of the website, used in links inside emails and for Google sign-in.
     app_url: str = "http://localhost:3000"
+
+    # "Continue with Google" (optional, free): an OAuth client from Google Cloud Console.
+    # Authorized redirect URI: <app_url>/api/auth/google/callback
+    google_client_id: str = ""
+    google_client_secret: str = ""
 
     # Outgoing email (password reset, email verification, invites). Optional.
     # Any SMTP service works, e.g. Gmail with an app password, Brevo or Resend free tiers.
@@ -39,7 +44,7 @@ class Settings(BaseSettings):
     smtp_port: int = 587
     smtp_user: str = ""
     smtp_password: str = ""
-    smtp_from: str = ""  # e.g. "RAGX <no-reply@yourcollege.edu>"
+    smtp_from: str = ""  # e.g. "RAGX <no-reply@example.org>"
     smtp_tls: str = "starttls"  # starttls | ssl | none
     # Comma-separated roots that file/directory sources must live under.
     # Empty = unrestricted (single-user local mode); Docker sets /docs,/app/data.
@@ -162,7 +167,7 @@ class AccessPolicy(BaseModel):
     signup_enabled: bool = True
     allowed_email_domains: list[str] = Field(default_factory=list)  # empty = any domain
     join_code: str = ""  # empty = not required
-    # Students must click the link in a verification email before asking questions.
+    # Members must click the link in a verification email before asking questions.
     # Only enforced when outgoing email is configured.
     require_email_verification: bool = False
     default_plan: str = "free"
