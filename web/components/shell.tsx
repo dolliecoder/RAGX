@@ -5,7 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { SOURCE_URL, api, post } from "@/lib/api";
 import { storageGet, storageSet } from "@/lib/hooks";
-import type { KB, Usage, User } from "@/lib/types";
+import type { AuthOptions, KB, Usage, User } from "@/lib/types";
 
 type Ctx = {
   user: User | null;
@@ -30,16 +30,16 @@ const AppCtx = createContext<Ctx>({
 export const useKB = () => useContext(AppCtx);
 export const useAuth = () => useContext(AppCtx);
 
-const PUBLIC = ["/login", "/signup"];
+const PUBLIC = ["/login", "/signup", "/forgot", "/reset", "/verify"];
 const ADMIN_ONLY = ["/health", "/repair", "/knowledge", "/evals", "/users", "/settings"];
 
 type NavItem = { href: string; label: string; icon: string; badge?: boolean };
 const STUDENT_NAV: NavItem[] = [
-  { href: "/", label: "Ask", icon: "◎" },
+  { href: "/ask", label: "Ask", icon: "◎" },
   { href: "/traces", label: "My questions", icon: "≡" },
 ];
 const ADMIN_NAV: NavItem[] = [
-  { href: "/", label: "Ask", icon: "◎" },
+  { href: "/ask", label: "Ask", icon: "◎" },
   { href: "/health", label: "Health", icon: "♥" },
   { href: "/traces", label: "Traces", icon: "≡" },
   { href: "/repair", label: "Repair", icon: "✚", badge: true },
@@ -72,13 +72,22 @@ function UsageMeter({ usage }: { usage: Usage }) {
 export function Shell({ children }: { children: ReactNode }) {
   const path = usePathname();
   const router = useRouter();
-  const isPublic = PUBLIC.some((p) => path.startsWith(p));
+  const isLanding = path === "/";
+  const isPublic = isLanding || PUBLIC.some((p) => path.startsWith(p));
   const [user, setUser] = useState<User | null>(null);
   const [checked, setChecked] = useState(false);
   const [kbs, setKbs] = useState<KB[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
   const [pending, setPending] = useState(0);
+  const [opts, setOpts] = useState<AuthOptions | null>(null);
+  const [resent, setResent] = useState<string | null>(null);
+
+  useEffect(() => {
+    api<AuthOptions>("/auth/options")
+      .then(setOpts)
+      .catch(() => {});
+  }, []);
 
   const refreshUser = useCallback(async () => {
     try {
@@ -154,11 +163,15 @@ export function Shell({ children }: { children: ReactNode }) {
       await post("/auth/logout");
     } finally {
       setUser(null);
-      window.location.assign("/login");
+      window.location.assign("/");
     }
   };
 
   const ctx: Ctx = { user, setUsage, refreshUser, kbs, kb, setKb, refresh, apiError };
+
+  if (isLanding) {
+    return <AppCtx.Provider value={ctx}>{children}</AppCtx.Provider>;
+  }
 
   if (isPublic) {
     return (
@@ -191,9 +204,9 @@ export function Shell({ children }: { children: ReactNode }) {
     <AppCtx.Provider value={ctx}>
       <div className="shell">
         <aside className="sidebar">
-          <div className="brand">
+          <Link href="/" className="brand brand-link" title="RAGX home">
             <span className="brand-mark">RX</span> RAGX
-          </div>
+          </Link>
           {kbs.length > 1 && (
             <label className="field" style={{ padding: "0 4px" }}>
               Knowledge base
@@ -209,7 +222,7 @@ export function Shell({ children }: { children: ReactNode }) {
           )}
           <nav className="nav">
             {nav.map((n) => {
-              const active = n.href === "/" ? path === "/" : path.startsWith(n.href);
+              const active = path.startsWith(n.href);
               return (
                 <Link key={n.href} href={n.href} className={active ? "active" : ""}>
                   <span aria-hidden>{n.icon}</span> {n.label}
@@ -246,9 +259,28 @@ export function Shell({ children }: { children: ReactNode }) {
               {apiError}
             </div>
           )}
+          {opts?.require_email_verification && !user.email_verified && !isAdmin && (
+            <div className="note-box" style={{ marginBottom: 16 }}>
+              Please confirm your email address: open the link we sent to <b>{user.email}</b>.{" "}
+              <button
+                className="sm"
+                onClick={async () => {
+                  try {
+                    await post("/auth/resend-verification");
+                    setResent("Sent. Check your inbox and spam folder.");
+                  } catch (e) {
+                    setResent((e as Error).message);
+                  }
+                }}
+              >
+                Resend email
+              </button>{" "}
+              {resent && <span className="small">{resent}</span>}
+            </div>
+          )}
           {blocked ? (
             <div className="card empty">
-              This page is for administrators. <Link href="/">Go to Ask</Link>
+              This page is for administrators. <Link href="/ask">Go to Ask</Link>
             </div>
           ) : (
             children

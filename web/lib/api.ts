@@ -15,7 +15,7 @@ export class ApiError extends Error {
 
 type Init = Omit<RequestInit, "body"> & { json?: unknown; body?: BodyInit };
 
-const PUBLIC_PAGES = ["/login", "/signup"];
+const PUBLIC_PAGES = ["/login", "/signup", "/forgot", "/reset", "/verify"];
 
 export async function api<T = unknown>(path: string, init: Init = {}): Promise<T> {
   const { json, ...rest } = init;
@@ -43,7 +43,7 @@ export async function api<T = unknown>(path: string, init: Init = {}): Promise<T
     const obj = (data && typeof data === "object" ? data : null) as Record<string, unknown> | null;
     const detail = obj?.detail;
     const msg = typeof detail === "string" ? detail : detail ? JSON.stringify(detail) : `HTTP ${res.status}`;
-    if (res.status === 401 && typeof window !== "undefined" && !PUBLIC_PAGES.some((p) => window.location.pathname.startsWith(p)) && !path.startsWith("/auth/")) {
+    if (res.status === 401 && typeof window !== "undefined" && window.location.pathname !== "/" && !PUBLIC_PAGES.some((p) => window.location.pathname.startsWith(p)) && !path.startsWith("/auth/")) {
       const next = encodeURIComponent(window.location.pathname + window.location.search);
       window.location.assign(`/login?next=${next}`);
     }
