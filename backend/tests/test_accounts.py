@@ -123,11 +123,13 @@ def test_csrf_header_required_for_cookie_requests(admin):
 def test_students_cannot_manage(admin):
     s = student()
     for method, path, body in [
-        ("post", "/api/kbs", {"name": "x"}),
+        # shared knowledge bases are read-only for members (their own workspaces are not)
+        ("patch", f"/api/kbs/{admin.kb}", {"name": "mine now"}),
+        ("delete", f"/api/kbs/{admin.kb}", None),
+        ("post", f"/api/kbs/{admin.kb}/sources", {"kind": "url", "uri": "https://example.org"}),
         ("get", "/api/users", None),
         ("get", "/api/access", None),
         ("put", "/api/config", {"data": {}}),
-        ("get", f"/api/kbs/{admin.kb}/documents", None),
         ("post", f"/api/kbs/{admin.kb}/repair", None),
         ("get", f"/api/kbs/{admin.kb}/metrics", None),
         ("get", "/api/audit", None),
