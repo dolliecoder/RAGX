@@ -221,6 +221,36 @@ function AccessForm() {
           </table>
           </div>
           <p className="faint small">0 questions per day = unlimited. Administrators are never limited.</p>
+          <div className="table-wrap mt">
+          <table className="t small">
+            <thead>
+              <tr>
+                <th>Plan</th>
+                <th>Workspaces</th>
+                <th>Files each</th>
+                <th>Pages each</th>
+                <th>Max file (MB)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(p.plans).map(([name, lim]) => (
+                <tr key={name}>
+                  <td>
+                    <b>{name}</b>
+                  </td>
+                  {(["workspaces", "files_per_workspace", "pages_per_workspace", "max_file_mb"] as const).map((f) => (
+                    <td key={f}>
+                      <input type="number" min={0} style={{ width: 70 }} value={lim[f]} onChange={(e) => setPlan(name, f, Number(e.target.value))} aria-label={`${name} ${f}`} />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          </div>
+          <p className="faint small">
+            Limits for the private workspaces people create (0 = unlimited). Everyone&apos;s uploads use your AI quota, so keep these modest on a free key.
+          </p>
         </div>
       </div>
       <div className="row mt">

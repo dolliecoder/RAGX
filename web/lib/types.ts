@@ -1,4 +1,17 @@
-export type KB = { id: string; name: string; description: string; visibility: "all" | "admins"; documents: number; tokens: number; created_at: string };
+export type KB = {
+  id: string;
+  name: string;
+  description: string;
+  visibility: "all" | "admins";
+  shared: boolean; // made by an admin for everyone; false = someone's private workspace
+  can_edit: boolean;
+  general_knowledge: boolean;
+  documents: number;
+  tokens: number;
+  pages: number;
+  limits: { files: number; pages: number; max_file_mb: number } | null;
+  created_at: string;
+};
 
 export type Citation = {
   n: number;
@@ -12,7 +25,15 @@ export type Citation = {
   origin: string;
 };
 
-export type Span = { start: number; end: number; text: string; citations: number[] };
+export type Span = {
+  start: number;
+  end: number;
+  text: string;
+  citations: number[];
+  // layout (older answers have none: treated as one paragraph)
+  block?: "continue" | "paragraph" | "bullet" | "numbered";
+  heading?: string;
+};
 
 export type Metrics = {
   groundedness?: number | null;
@@ -40,6 +61,17 @@ export type Answer = {
   latency_ms: number;
   healed: boolean;
   offline: boolean;
+  recheck?: Recheck | null;
+  general?: string | null; // answer from general knowledge: not from the files, not verified
+};
+
+export type Recheck = {
+  verdict: "stands" | "stands_correction_unsupported" | "you_were_right" | "fixed" | "both" | "unclear" | "not_checkable" | "error";
+  message: string;
+  original: { supported: boolean; grounded: number } | null;
+  correction: { supported: boolean; grounded: number } | null;
+  updated_trace_id: string | null;
+  updated?: Answer;
 };
 
 export type TraceBrief = {
@@ -201,6 +233,7 @@ export type Golden = {
   expected_doc_ids: string[];
   origin: string;
   active: boolean;
+  note?: string;
   created_at: string;
 };
 
@@ -269,7 +302,16 @@ export type User = {
   usage: Usage | null;
 };
 
-export type PlanLimits = { daily_questions: number; per_minute: number; deep_per_day: number; max_concurrent: number };
+export type PlanLimits = {
+  daily_questions: number;
+  per_minute: number;
+  deep_per_day: number;
+  max_concurrent: number;
+  workspaces: number;
+  files_per_workspace: number;
+  pages_per_workspace: number;
+  max_file_mb: number;
+};
 
 export type AccessPolicy = {
   signup_enabled: boolean;
@@ -296,3 +338,7 @@ export type UsageStats = {
   today: { questions: number; global_limit: number | null };
   users: { total: number; active_today: number };
 };
+
+export type ChatBrief = { id: string; title: string; updated_at: string; messages: number };
+export type ChatTurn = { query: string; answer: Answer };
+export type Chat = { id: string; title: string; turns: ChatTurn[] };

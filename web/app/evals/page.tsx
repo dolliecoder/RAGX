@@ -77,7 +77,7 @@ function GoldenSet({ kb }: { kb: KB }) {
                     <Badge value={g.origin} tone={g.origin === "healed" ? "info" : g.origin === "feedback" ? "warn" : ""} />
                     {g.origin === "feedback" && !g.active && (
                       <div className="small" style={{ color: "var(--warn)" }}>
-                        user correction: check it, then Enable
+                        {g.note || "user correction: check it, then Enable"}
                       </div>
                     )}
                   </td>
