@@ -138,8 +138,8 @@ def set_runner(r: JobRunner | None) -> None:
     _runner = r
 
 
-def create_job(session: Session, kind: str, kb_id: str | None, payload: dict[str, Any]) -> Job:
-    job = Job(kind=kind, kb_id=kb_id, input=payload)
+def create_job(session: Session, kind: str, kb_id: str | None, payload: dict[str, Any], user_id: str | None = None) -> Job:
+    job = Job(kind=kind, kb_id=kb_id, input=payload, user_id=user_id)
     session.add(job)
     session.flush()
     get_runner().submit_after_commit(session, job.id)

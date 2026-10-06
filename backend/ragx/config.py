@@ -158,6 +158,11 @@ class PlanLimits(BaseModel):
     per_minute: int = 5
     deep_per_day: int = 2
     max_concurrent: int = 2
+    # private workspaces (0 = unlimited)
+    workspaces: int = 5
+    files_per_workspace: int = 20
+    pages_per_workspace: int = 300
+    max_file_mb: int = 25
 
 
 class AccessPolicy(BaseModel):
@@ -174,7 +179,9 @@ class AccessPolicy(BaseModel):
     plans: dict[str, PlanLimits] = Field(
         default_factory=lambda: {
             "free": PlanLimits(),
-            "pro": PlanLimits(daily_questions=300, per_minute=15, deep_per_day=20, max_concurrent=4),
+            "pro": PlanLimits(
+                daily_questions=300, per_minute=15, deep_per_day=20, max_concurrent=4, workspaces=20, files_per_workspace=50, pages_per_workspace=1500
+            ),
         }
     )
     # Whole-site daily cap protecting a shared (e.g. free-tier) model quota. 0 = none.

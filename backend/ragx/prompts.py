@@ -71,7 +71,16 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "generate": _obj(
         {
-            "sentences": _arr(_obj({"text": _STR, "citations": _arr(_STR)})),
+            "sentences": _arr(
+                _obj(
+                    {
+                        "text": _STR,
+                        "citations": _arr(_STR),
+                        "block": _enum("continue", "paragraph", "bullet", "numbered"),
+                        "heading": _STR,
+                    }
+                )
+            ),
             "unanswered": _arr(_STR),
             "conflicts": _arr(_STR),
         }
@@ -105,6 +114,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "improve_prompt": _obj({"addendum": _STR, "rationale": _STR}),
     "chat": _obj({"answer": _STR}),
+    "general": _obj({"answer": _STR}),
 }
 
 _EVIDENCE_RULE = (
@@ -284,6 +294,15 @@ def generate(
         "4. If sources disagree, say so explicitly, prefer the more recent / higher-authority source, "
         "and describe the disagreement in 'conflicts'.\n"
         "5. Be concise and direct. One claim per sentence where possible.\n"
+        "6. Format the answer so it is easy to read, like a helpful chat assistant:\n"
+        "   - Open with a one-sentence direct answer, then give the details.\n"
+        "   - Use 'bullet' (or 'numbered' for steps/rankings) when listing several items, people, steps or facts; "
+        "use 'paragraph' to start a new paragraph and 'continue' to keep writing the current paragraph or list item.\n"
+        "   - For longer answers covering distinct topics, set 'heading' to a short section title (2-5 words) on the "
+        "first sentence of each section; otherwise leave heading empty. Short answers need no headings.\n"
+        "   - Wrap the few most important names, numbers or terms in **double asterisks**.\n"
+        "   - Write maths in plain readable symbols (x², √2, π, ≤, f′(x)), never LaTeX or $ signs.\n"
+        "   - Formatting never replaces citations: every factual sentence still cites its evidence.\n"
         + _EVIDENCE_RULE
     )
     if show_conflicts:
@@ -296,7 +315,8 @@ def generate(
     subq = "\n".join(f"- {q}" for q in subquestions)
     user = (
         f"Evidence:\n{_evidence_block(evidence)}\n\nQuestion: {query}\nSub-questions to cover:\n{subq}{avoid}\n\n"
-        'JSON: {"sentences": [{"text": str, "citations": [str]}], "unanswered": [str], "conflicts": [str]}'
+        'JSON: {"sentences": [{"text": str, "citations": [str], "block": "continue"|"paragraph"|"bullet"|"numbered", '
+        '"heading": str}], "unanswered": [str], "conflicts": [str]}'
     )
     return _req(
         "generate",
@@ -396,6 +416,26 @@ def chat(query: str, cfg: RuntimeConfig) -> LLMRequest:
         "briefly and helpfully. Do not state facts about the user's organisation or documents."
     )
     return _req("chat", system, f"User message: {query}\n\nJSON: {{\"answer\": str}}", {"query": query}, cfg, max_tokens=600, effort="low")
+
+
+def general(query: str, missing: list[str], cfg: RuntimeConfig) -> LLMRequest:
+    """Answer what the user's files don't cover from the model's own knowledge.
+
+    The result is shown separately from the cited, verified answer and labelled as
+    not coming from the user's documents."""
+    system = (
+        "You are a careful tutor. The user's own study files do not cover the question below (or part of it). "
+        "Answer it from your general knowledge, accurately and clearly, the way a good textbook would. "
+        "Use Markdown: a one-sentence direct answer first, then short paragraphs, bullet points, numbered steps "
+        "or a formula where helpful; bold the key terms. Write maths in plain readable symbols, not LaTeX "
+        "(e.g. f′(c) = 0, x² + y², √2, π, ≤, ∫, [a, b]); never use $ signs or backslash commands. "
+        "Keep it focused (under about 250 words unless the "
+        "question needs more). Never claim the information comes from the user's documents. If you are not "
+        "sure of something, say so plainly instead of guessing."
+    )
+    gaps = "\n".join(f"- {m}" for m in missing) or f"- {query}"
+    user = f"Question: {query}\nNot covered by the user's files:\n{gaps}\n\nJSON: {{\"answer\": str}}"
+    return _req("general", system, user, {"query": query, "missing": missing}, cfg, max_tokens=1500, effort="low")
 
 
 def improve_prompt(task: str, current_addendum: str, failures: list[dict[str, Any]]) -> LLMRequest:

@@ -222,6 +222,9 @@ class FakeProvider:
             "rationale": "offline lexical judge",
         }
 
+    def _t_general(self, p: dict[str, Any]) -> dict[str, Any]:
+        return {"answer": f"From general knowledge: {p['query']}"}
+
     def _t_chat(self, p: dict[str, Any]) -> dict[str, Any]:
         return {"answer": "Hello! Ask me anything about the documents in this knowledge base."}
 

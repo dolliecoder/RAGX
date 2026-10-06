@@ -28,6 +28,34 @@ from ..retrieval.engine import Candidate, RetrievalEngine, SubQuery
 from ..retrieval.web import web_available, web_search
 from ..signals import assign_cluster, detect_rephrase, session_history
 from ..text import content_terms, estimate_tokens, identifiers, overlap, sentences
+
+BLOCKS = {"continue", "paragraph", "bullet", "numbered"}
+
+
+def sentences_to_markdown(sents: list[dict[str, Any]]) -> str:
+    """Plain-text (Markdown) rendering of structured answer sentences, for copy/CLI/API users."""
+    lines: list[str] = []
+    n = 0
+    for s in sents:
+        text = s["text"].strip()
+        block = s.get("block", "continue")
+        if s.get("heading"):
+            lines += ["", f"### {s['heading']}"]
+            n = 0
+            if block == "continue":
+                block = "paragraph"
+        if block == "bullet":
+            lines.append(f"- {text}")
+        elif block == "numbered":
+            n += 1
+            lines.append(f"{n}. {text}")
+        elif block == "paragraph" or not lines:
+            lines += ["", text]
+            n = 0
+        else:
+            lines[-1] += " " + text
+    return "\n".join(lines).strip()
+
 from ..util import run_parallel
 
 log = logging.getLogger("ragx.reflex")
@@ -82,6 +110,7 @@ class QueryOptions:
     allow_escalation: bool = True
     meter: Meter | None = None
     subquestions: list[str] | None = None  # pre-planned (deep workers)
+    allow_general: bool = False  # label-and-answer from general knowledge when the files fall short
 
 
 @dataclass
@@ -94,6 +123,8 @@ class Outcome:
     conflicts: list[str] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
     claims: list[dict[str, Any]] = field(default_factory=list)  # verifier verdicts (citation numbers)
+    general: str = ""  # answer from general knowledge (not from the documents, not verified)
+
 
 
 class QueryEngine:
@@ -148,8 +179,11 @@ class QueryEngine:
                     evidence = self._retrieve_and_grade(subqs, gate, opts, rec, diag)
                     evidence = self._heal_retrieval(subqs, evidence, gate, opts, rec, diag, budget.max_heal_rounds)
                 outcome = self._answer_and_verify(query, subqs, evidence, gate, opts, rec, diag, budget.max_heal_rounds)
+                if opts.allow_general and not opts.is_eval and (outcome.status == "failed" or outcome.unanswered):
+                    outcome.general = self._general(query, outcome.unanswered or [query], rec)
                 if (
-                    outcome.status in ("partial", "failed")
+                    not outcome.general
+                    and outcome.status in ("partial", "failed")
                     and opts.allow_escalation
                     and opts.mode == "auto"
                     and route == "standard"
@@ -185,6 +219,7 @@ class QueryEngine:
             "latency_ms": rec.elapsed_ms(),
             "healed": bool(diag["heals"]),
             "offline": self.reg.is_offline("generator"),
+            "general": outcome.general or None,
         }
         if opts.persist:
             result["trace_id"] = self._persist(query, opts, route, outcome, rec, diag, meter, subqs, evidence, job_id)
@@ -239,6 +274,17 @@ class QueryEngine:
                 route = "fast" if gate["complexity"] == "simple" else "standard"
         rec.add("gate", route=route, threshold=self.cfg.gate_threshold, **gate)
         return route, gate
+
+    def _general(self, query: str, missing: list[str], rec: TraceRecorder) -> str:
+        """The files don't (fully) answer this: answer from general knowledge, kept separate and labelled."""
+        try:
+            resp = self.reg.call("generator", prompts.general(query, missing, self.cfg))
+            text = str((resp.data or {}).get("answer", "")).strip()
+        except (ProviderError, BudgetExceeded, AttributeError) as e:
+            rec.add("general_knowledge", error=str(e)[:200])
+            return ""
+        rec.add("general_knowledge", missing=missing, chars=len(text))
+        return text
 
     def _direct(self, query: str, rec: TraceRecorder) -> Outcome:
         resp = self.reg.call("generator", prompts.chat(query, self.cfg))
@@ -544,7 +590,15 @@ class QueryEngine:
             text = str(s.get("text", "")).strip()
             if text:
                 cites = [str(c) for c in s.get("citations", []) if str(c) in valid]
-                sents.append({"text": text, "citations": list(dict.fromkeys(cites))})
+                block = str(s.get("block", "")).strip().lower()
+                sents.append(
+                    {
+                        "text": text,
+                        "citations": list(dict.fromkeys(cites)),
+                        "block": block if block in BLOCKS else "continue",
+                        "heading": " ".join(str(s.get("heading") or "").split())[:80],
+                    }
+                )
         unanswered = [str(u) for u in d.get("unanswered", []) if str(u).strip()]
         conflicts = [str(c) for c in d.get("conflicts", []) if str(c).strip()]
         rec.add("generate", model=resp.model or resp.provider, sentences=len(sents), unanswered=len(unanswered), conflicts=len(conflicts))
@@ -631,6 +685,7 @@ class QueryEngine:
             by_sentence.setdefault(c["sentence"], []).append(c)
         kept, kept_claims, dropped = [], [], []
         fixed_citations = 0
+        carry: dict[str, str] = {}  # layout of a dropped sentence moves to the next kept one
         for si, s in enumerate(sents):
             cl = by_sentence.get(si, [])
             if cl and all(c["support"] == "full" for c in cl):
@@ -638,9 +693,18 @@ class QueryEngine:
                 if sup and set(sup) != set(s["citations"]):
                     fixed_citations += 1
                 new_idx = len(kept)
-                kept.append({"text": s["text"], "citations": sup or s["citations"]})
+                layout = {
+                    "block": s.get("block", "continue") if s.get("block", "continue") != "continue" else carry.get("block", "continue"),
+                    "heading": s.get("heading") or carry.get("heading", ""),
+                }
+                carry = {}
+                kept.append({"text": s["text"], "citations": sup or s["citations"], **layout})
                 kept_claims += [{**c, "sentence": new_idx} for c in cl]
             else:
+                if s.get("block", "continue") != "continue" and "block" not in carry:
+                    carry["block"] = s["block"]
+                if s.get("heading") and "heading" not in carry:
+                    carry["heading"] = s["heading"]
                 dropped.append({"sentence": s["text"], "claims": [c["claim"] for c in cl if c["support"] != "full"], "cited": s["citations"]})
         diag["unsupported"] += dropped
         diag["heals"].append({"step": "H1", "action": "repair_answer", "dropped": len(dropped), "fixed_citations": fixed_citations})
@@ -762,10 +826,12 @@ class QueryEngine:
                     label_num[lab] = len(label_num) + 1
                     citations.append(self._citation(label_num[lab], g, text))
                 nums.append(label_num[lab])
-            spans.append({"start": start, "end": end, "text": text, "citations": nums})
+            spans.append(
+                {"start": start, "end": end, "text": text, "citations": nums, "block": s.get("block", "continue"), "heading": s.get("heading", "")}
+            )
             answer_parts.append(text)
             pos = end
-        answer = " ".join(answer_parts)
+        answer = sentences_to_markdown(sents) if any(s.get("block", "continue") != "continue" or s.get("heading") for s in sents) else " ".join(answer_parts)
         if not answer:
             answer = "I could not produce an answer that is supported by the knowledge base."
         notes = []
@@ -848,6 +914,7 @@ class QueryEngine:
                 "llm": meter.snapshot(),
                 "job_id": job_id,
                 "staged_docs": sorted(opts.staged_docs),
+                "general": outcome.general or None,
             },
         )
         self.session.add(trace)

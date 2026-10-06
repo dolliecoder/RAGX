@@ -99,6 +99,12 @@ class KnowledgeBase(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     # all = every signed-in user can ask it; admins = admins only (drafts, staff docs)
     visibility: Mapped[str] = mapped_column(String(20), default="all")
+    # a workspace someone made for themselves; None = shared knowledge base made by an admin
+    owner_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    # display name (private workspaces keep a unique internal ``name``)
+    title: Mapped[str] = mapped_column(String(200), default="")
+    # answer from the model's general knowledge (clearly labelled) when the files don't cover a question
+    general_knowledge: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = _created()
 
 
@@ -213,6 +219,8 @@ class Trace(Base):
     is_eval: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     diagnosed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     negative_signal: Mapped[bool] = mapped_column(Boolean, default=False)
+    # the asker removed it from their chat history (kept for repair/metrics)
+    hidden: Mapped[bool] = mapped_column(Boolean, default=False)
     data: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = _created()
 
@@ -251,6 +259,7 @@ class GoldenItem(Base):
     expected_doc_ids: Mapped[list] = mapped_column(JSON, default=list)
     origin: Mapped[str] = mapped_column(String(20), default="manual")  # manual | healed | feedback
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    note: Mapped[str] = mapped_column(Text, default="")  # e.g. why a feedback item is disabled
     created_at: Mapped[datetime] = _created()
 
 

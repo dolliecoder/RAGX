@@ -12,11 +12,11 @@ from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from . import __version__
 from . import limits as usage_limits
-from .auth import AuthError, Principal
+from .auth import AuthError, Principal, rate_guard
 from .bootstrap import init_app
 from .config import RuntimeConfig, get_settings
 from .control import activate, active_config, audit, canary_version, create_version, rollback_version, select_config
@@ -43,6 +43,7 @@ from .models import (
     User,
 )
 from .reflex.engine import QueryEngine, QueryOptions
+from .recheck import recheck as recheck_answer
 from .signals import record_feedback
 from .tasks import Scheduler
 from .api_accounts import router as accounts_router
@@ -137,28 +138,71 @@ class KBIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = ""
     visibility: Literal["all", "admins"] = "all"
+    # admins: true = a shared knowledge base everyone can use; false = a private workspace
+    shared: bool | None = None
+    general_knowledge: bool = True
 
 
 class KBPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = None
     visibility: Literal["all", "admins"] | None = None
+    general_knowledge: bool | None = None
 
 
-def _kb(s, kb_id: str, p: Principal | None = None) -> KnowledgeBase:
+PAGE_TOKENS = 500  # rough tokens per page, for the page-based workspace limits
+
+
+def _can_see(kb: KnowledgeBase, p: Principal) -> bool:
+    if kb.owner_id:  # private workspaces are only ever visible to their owner
+        return p.user_id == kb.owner_id
+    return p.is_admin or kb.visibility == "all"
+
+
+def _can_edit(kb: KnowledgeBase, p: Principal) -> bool:
+    return (p.user_id is not None and p.user_id == kb.owner_id) or (kb.owner_id is None and p.is_admin)
+
+
+def _kb(s, kb_id: str, p: Principal | None = None, *, edit: bool = False) -> KnowledgeBase:
     kb = s.get(KnowledgeBase, kb_id) or s.scalar(select(KnowledgeBase).where(KnowledgeBase.name == kb_id))
-    if kb is None or (p is not None and not p.is_admin and kb.visibility != "all"):
+    if kb is None or (p is not None and not _can_see(kb, p)):
         _404("knowledge base")
+    if edit and p is not None and not _can_edit(kb, p):
+        raise HTTPException(403, "Only the owner of this workspace can change it.")
     return kb
 
 
-def _kb_out(s, kb: KnowledgeBase) -> dict[str, Any]:
-    docs = s.scalar(select(func.count()).select_from(Document).where(Document.kb_id == kb.id)) or 0
-    tokens = s.scalar(select(func.coalesce(func.sum(Chunk.token_count), 0)).where(Chunk.kb_id == kb.id, Chunk.status == "active")) or 0
+def _plan_limits(s, p: Principal):
+    from .auth import load_policy
+
+    u = s.get(User, p.user_id) if p.user_id else None
+    return load_policy(s).limits_for(u.plan if u is not None else "")
+
+
+def _kb_usage(s, kb_id: str) -> tuple[int, int]:
+    files = s.scalar(
+        select(func.count()).select_from(Document).where(Document.kb_id == kb_id, Document.status.not_in(("superseded",)))
+    ) or 0
+    tokens = s.scalar(select(func.coalesce(func.sum(Chunk.token_count), 0)).where(Chunk.kb_id == kb_id, Chunk.status == "active")) or 0
+    return int(files), int(tokens)
+
+
+def _kb_out(s, kb: KnowledgeBase, p: Principal | None = None) -> dict[str, Any]:
+    docs, tokens = _kb_usage(s, kb.id)
+    limits = None
+    if p is not None and kb.owner_id and not p.is_admin:
+        pl = _plan_limits(s, p)
+        limits = {"files": pl.files_per_workspace, "pages": pl.pages_per_workspace, "max_file_mb": pl.max_file_mb}
     return {
         "id": kb.id,
-        "name": kb.name,
+        "name": kb.title or kb.name,
         "description": kb.description,
         "visibility": kb.visibility,
+        "shared": kb.owner_id is None,
+        "can_edit": bool(p is not None and _can_edit(kb, p)),
+        "general_knowledge": kb.general_knowledge,
+        "pages": round(tokens / PAGE_TOKENS),
+        "limits": limits,
         "documents": docs,
         "tokens": int(tokens),
         "created_at": _dt(kb.created_at),
@@ -168,48 +212,89 @@ def _kb_out(s, kb: KnowledgeBase) -> dict[str, Any]:
 @app.get("/api/kbs")
 def list_kbs(p: Principal = signed_in) -> list[dict[str, Any]]:
     with session_scope() as s:
-        q = select(KnowledgeBase).order_by(KnowledgeBase.created_at)
-        if not p.is_admin:
-            q = q.where(KnowledgeBase.visibility == "all")
-        return [_kb_out(s, kb) for kb in s.scalars(q)]
+        rows = s.scalars(select(KnowledgeBase).order_by(KnowledgeBase.created_at)).all()
+        return [_kb_out(s, kb, p) for kb in rows if _can_see(kb, p)]
 
 
 @app.post("/api/kbs", status_code=201)
-def create_kb(body: KBIn, p: Principal = api) -> dict[str, Any]:
+def create_kb(body: KBIn, p: Principal = signed_in) -> dict[str, Any]:
+    import uuid
+
+    title = " ".join(body.name.split())
+    # admins create shared knowledge bases by default (CLI/back-compat); everyone else gets a private workspace
+    shared = p.is_admin if body.shared is None else (body.shared and p.is_admin)
     with session_scope() as s:
-        if s.scalar(select(KnowledgeBase).where(KnowledgeBase.name == body.name)):
-            raise HTTPException(409, "a knowledge base with this name exists")
-        kb = KnowledgeBase(name=body.name, description=body.description, visibility=body.visibility)
+        if shared:
+            if s.scalar(select(KnowledgeBase).where(KnowledgeBase.name == title)):
+                raise HTTPException(409, "a knowledge base with this name exists")
+            kb = KnowledgeBase(name=title, description=body.description, visibility=body.visibility, general_knowledge=body.general_knowledge)
+        else:
+            if not p.user_id:
+                raise HTTPException(400, "Workspaces belong to signed-in accounts.")
+            mine = s.scalars(select(KnowledgeBase).where(KnowledgeBase.owner_id == p.user_id)).all()
+            if any((k.title or k.name).lower() == title.lower() for k in mine):
+                raise HTTPException(409, f"You already have a workspace called “{title}”.")
+            limit = _plan_limits(s, p).workspaces
+            if not p.is_admin and limit and len(mine) >= limit:
+                raise HTTPException(403, f"You can have up to {limit} workspaces. Delete one you no longer need to make room.")
+            kb = KnowledgeBase(
+                name=f"ws-{uuid.uuid4().hex[:20]}",
+                title=title,
+                description=body.description,
+                visibility="all",
+                owner_id=p.user_id,
+                general_knowledge=body.general_knowledge,
+            )
         s.add(kb)
         s.flush()
-        audit(s, p.email, "kb.create", kb.id, name=body.name)
-        return _kb_out(s, kb)
+        audit(s, p.email, "kb.create", kb.id, name=title, shared=shared)
+        return _kb_out(s, kb, p)
 
 
 @app.get("/api/kbs/{kb_id}")
 def get_kb(kb_id: str, p: Principal = signed_in) -> dict[str, Any]:
     with session_scope() as s:
-        return _kb_out(s, _kb(s, kb_id, p))
+        return _kb_out(s, _kb(s, kb_id, p), p)
 
 
 @app.patch("/api/kbs/{kb_id}")
-def patch_kb(kb_id: str, body: KBPatch, p: Principal = api) -> dict[str, Any]:
+def patch_kb(kb_id: str, body: KBPatch, p: Principal = signed_in) -> dict[str, Any]:
     with session_scope() as s:
-        kb = _kb(s, kb_id)
+        kb = _kb(s, kb_id, p, edit=True)
+        if body.name is not None:
+            title = " ".join(body.name.split())
+            if kb.owner_id:
+                clash = s.scalar(
+                    select(KnowledgeBase).where(KnowledgeBase.owner_id == kb.owner_id, KnowledgeBase.id != kb.id, func.lower(KnowledgeBase.title) == title.lower())
+                )
+                if clash is not None:
+                    raise HTTPException(409, f"You already have a workspace called “{title}”.")
+            kb.title = title
         if body.description is not None:
             kb.description = body.description
-        if body.visibility is not None:
+        if body.visibility is not None and kb.owner_id is None:
             kb.visibility = body.visibility
+        if body.general_knowledge is not None:
+            kb.general_knowledge = body.general_knowledge
         audit(s, p.email, "kb.update", kb.id, **body.model_dump(exclude_none=True))
-        return _kb_out(s, kb)
+        return _kb_out(s, kb, p)
 
 
 @app.delete("/api/kbs/{kb_id}")
-def delete_kb(kb_id: str, p: Principal = api) -> dict[str, Any]:
+def delete_kb(kb_id: str, p: Principal = signed_in) -> dict[str, Any]:
+    import shutil
+
     with session_scope() as s:
-        kb = _kb(s, kb_id)
+        kb = _kb(s, kb_id, p, edit=True)
+        kb_real, label = kb.id, kb.title or kb.name
+        s.execute(delete(Chunk).where(Chunk.kb_id == kb_real))
+        s.execute(delete(Document).where(Document.kb_id == kb_real))
         s.delete(kb)
-        audit(s, p.email, "kb.delete", kb.id, name=kb.name)
+        audit(s, p.email, "kb.delete", kb_real, name=label)
+    shutil.rmtree(get_settings().data_dir / "uploads" / kb_real, ignore_errors=True)
+    from .retrieval import index
+
+    index.invalidate(kb_real)
     return {"deleted": True}
 
 
@@ -289,32 +374,60 @@ _SAFE_NAME = re.compile(r"[^A-Za-z0-9._\- ]+")
 
 
 @app.post("/api/kbs/{kb_id}/upload", status_code=201)
-async def upload(kb_id: str, files: list[UploadFile] = File(...), p: Principal = api) -> dict[str, Any]:
+async def upload(kb_id: str, files: list[UploadFile] = File(...), p: Principal = signed_in) -> dict[str, Any]:
+    from .ingestion.parsers import ParseError, parse_bytes
+    from .text import estimate_tokens
+
     st = get_settings()
     with session_scope() as s:
-        kb = _kb(s, kb_id)
+        kb = _kb(s, kb_id, p, edit=True)
         kb_real = kb.id
+        limited = kb.owner_id is not None and not p.is_admin
+        pl = _plan_limits(s, p)
+        n_files, tokens = _kb_usage(s, kb_real)
+    max_bytes = (pl.max_file_mb if limited and pl.max_file_mb else 50) * 1024 * 1024
+    page_budget = pl.pages_per_workspace * PAGE_TOKENS if limited and pl.pages_per_workspace else None
+    file_budget = pl.files_per_workspace if limited and pl.files_per_workspace else None
     folder = (st.data_dir / "uploads" / kb_real).resolve()
     folder.mkdir(parents=True, exist_ok=True)
     saved, rejected = [], []
     for f in files:
         name = _SAFE_NAME.sub("_", Path(f.filename or "upload").name).strip() or "upload"
         if Path(name).suffix.lower() not in SUPPORTED:
-            rejected.append({"file": f.filename, "reason": "unsupported type (pdf, docx, html, md, txt)"})
+            rejected.append({"file": f.filename, "reason": "This file type isn't supported (use PDF, Word, HTML, Markdown or text)."})
             continue
         data = await f.read()
-        if len(data) > 50 * 1024 * 1024:
-            rejected.append({"file": f.filename, "reason": "larger than 50MB"})
+        if len(data) > max_bytes:
+            rejected.append({"file": f.filename, "reason": f"Larger than {max_bytes // (1024 * 1024)} MB."})
             continue
+        replacing = (folder / name).exists()
+        if file_budget is not None and not replacing and n_files >= file_budget:
+            rejected.append({"file": f.filename, "reason": f"This workspace is full ({file_budget} files). Remove a file to add more."})
+            continue
+        if page_budget is not None:
+            try:
+                est = estimate_tokens(parse_bytes(data, name).text)
+            except ParseError as e:
+                rejected.append({"file": f.filename, "reason": f"Couldn't read this file: {e}"})
+                continue
+            if tokens + est > page_budget:
+                left = max(0, (page_budget - tokens) // PAGE_TOKENS)
+                rejected.append(
+                    {"file": f.filename, "reason": f"Too big: about {round(est / PAGE_TOKENS)} pages, and this workspace has room for about {left} more."}
+                )
+                continue
+            tokens += est
         (folder / name).write_bytes(data)
         saved.append(name)
+        if not replacing:
+            n_files += 1
     with session_scope() as s:
         src = s.scalar(select(Source).where(Source.kb_id == kb_real, Source.kind == "directory", Source.uri == str(folder)))
         if src is None:
             src = Source(kb_id=kb_real, kind="directory", uri=str(folder), recursive=False)
             s.add(src)
             s.flush()
-        job = create_job(s, "crawl", kb_real, {"source_id": src.id, "force": False}) if saved else None
+        job = create_job(s, "crawl", kb_real, {"source_id": src.id, "force": False}, user_id=p.user_id) if saved else None
         audit(s, p.email, "upload", kb_real, files=saved)
         return {"saved": saved, "rejected": rejected, "job_id": job.id if job else None, "source_id": src.id}
 
@@ -341,20 +454,21 @@ def _doc_out(d: Document, chunks: int | None = None) -> dict[str, Any]:
     }
 
 
-@app.get("/api/kbs/{kb_id}/documents", dependencies=[api])
-def list_documents(kb_id: str) -> list[dict[str, Any]]:
+@app.get("/api/kbs/{kb_id}/documents")
+def list_documents(kb_id: str, p: Principal = signed_in) -> list[dict[str, Any]]:
     with session_scope() as s:
-        kb = _kb(s, kb_id)
+        kb = _kb(s, kb_id, p)
         counts = dict(
             s.execute(select(Chunk.doc_id, func.count()).where(Chunk.kb_id == kb.id, Chunk.status == "active").group_by(Chunk.doc_id)).all()
         )
         return [_doc_out(d, counts.get(d.id, 0)) for d in s.scalars(select(Document).where(Document.kb_id == kb.id).order_by(Document.title))]
 
 
-@app.get("/api/documents/{doc_id}", dependencies=[api])
-def get_document(doc_id: str) -> dict[str, Any]:
+@app.get("/api/documents/{doc_id}")
+def get_document(doc_id: str, p: Principal = signed_in) -> dict[str, Any]:
     with session_scope() as s:
         d = s.get(Document, doc_id) or _404("document")
+        _kb(s, d.kb_id, p)  # same visibility as the workspace it belongs to
         chunks = s.scalars(select(Chunk).where(Chunk.doc_id == d.id).order_by(Chunk.status, Chunk.ord)).all()
         return {
             **_doc_out(d, sum(1 for c in chunks if c.status == "active")),
@@ -376,6 +490,28 @@ def get_document(doc_id: str) -> dict[str, Any]:
                 for c in chunks
             ],
         }
+
+
+@app.delete("/api/documents/{doc_id}")
+def delete_document(doc_id: str, p: Principal = signed_in) -> dict[str, Any]:
+    with session_scope() as s:
+        d = s.get(Document, doc_id) or _404("document")
+        kb = _kb(s, d.kb_id, p, edit=True)
+        uploads = (get_settings().data_dir / "uploads" / kb.id).resolve()
+        path = Path(d.uri)
+        try:  # uploaded copies are removed so the next crawl doesn't bring the file back
+            if path.resolve().parent == uploads and path.exists():
+                path.unlink()
+        except OSError as e:
+            log.warning("could not remove %s: %s", path, e)
+        s.execute(delete(Chunk).where(Chunk.doc_id == d.id))
+        s.delete(d)
+        audit(s, p.email, "document.delete", doc_id, title=d.title, kb=kb.id)
+        kb_real = kb.id
+    from .retrieval import index
+
+    index.invalidate(kb_real)
+    return {"deleted": True}
 
 
 class DocAction(BaseModel):
@@ -439,6 +575,7 @@ def query(kb_id: str, body: QueryIn, p: Principal = signed_in) -> dict[str, Any]
                     # document ACL groups can only be asserted by admins / automation
                     principals=(set(body.principals) or None) if p.is_admin else None,
                     allow_escalation=can_go_deep,
+                    allow_general=kb.general_knowledge,
                 ),
             )
             usage_limits.record(s, p.user_id, result)
@@ -575,6 +712,116 @@ def get_trace(trace_id: str, p: Principal = signed_in) -> dict[str, Any]:
         }
 
 
+# ------------------------------------------------------------------- chats
+# A chat is the asker's own traces sharing a session_id. Everyone (admins too)
+# only sees their own chats here; the Traces page is the admin-wide view.
+def _chat_traces(s, kb_id: str, chat_id: str, p: Principal):
+    if not p.user_id:
+        raise HTTPException(400, "Chats belong to signed-in accounts.")
+    return select(Trace).where(
+        Trace.kb_id == kb_id,
+        Trace.session_id == chat_id,
+        Trace.user_id == p.user_id,
+        Trace.is_eval.is_(False),
+        Trace.hidden.is_(False),
+    )
+
+
+def _answer_from_trace(t: Trace) -> dict[str, Any]:
+    d = t.data or {}
+    return {
+        "status": t.status,
+        "answer": t.answer,
+        "sentences": d.get("sentences") or [],
+        "citations": d.get("citations") or [],
+        "unanswered": d.get("unanswered") or [],
+        "conflicts": d.get("conflicts") or [],
+        "route": t.route,
+        "metrics": d.get("metrics") or {},
+        "job_id": d.get("job_id"),
+        "trace_id": t.id,
+        "config_version": t.config_version,
+        "llm": d.get("llm") or {"calls": t.llm_calls, "tokens_in": t.tokens_in, "tokens_out": t.tokens_out, "by_task": {}},
+        "latency_ms": t.latency_ms,
+        "healed": t.healed,
+        "offline": False,
+        "recheck": d.get("recheck"),
+        "general": d.get("general"),
+    }
+
+
+def _with_updated(s, ans: dict[str, Any]) -> dict[str, Any]:
+    rc = ans.get("recheck")
+    if rc and rc.get("updated_trace_id"):
+        t2 = s.get(Trace, rc["updated_trace_id"])
+        if t2 is not None:
+            ans["recheck"] = {**rc, "updated": _answer_from_trace(t2)}
+    return ans
+
+
+@app.get("/api/kbs/{kb_id}/chats")
+def list_chats(kb_id: str, limit: int = Query(100, le=500), p: Principal = signed_in) -> list[dict[str, Any]]:
+    if not p.user_id:
+        return []
+    with session_scope() as s:
+        kb = _kb(s, kb_id, p)
+        mine = (
+            Trace.kb_id == kb.id,
+            Trace.user_id == p.user_id,
+            Trace.session_id.is_not(None),
+            Trace.is_eval.is_(False),
+            Trace.hidden.is_(False),
+        )
+        groups = s.execute(
+            select(Trace.session_id, func.min(Trace.created_at), func.max(Trace.created_at), func.count())
+            .where(*mine)
+            .group_by(Trace.session_id)
+            .order_by(func.max(Trace.created_at).desc())
+            .limit(limit)
+        ).all()
+        if not groups:
+            return []
+        # title = the first question of each chat
+        firsts = {
+            (sid, created): q
+            for sid, created, q in s.execute(
+                select(Trace.session_id, Trace.created_at, Trace.query).where(*mine, Trace.session_id.in_([g[0] for g in groups]))
+            )
+        }
+        return [
+            {"id": sid, "title": " ".join((firsts.get((sid, first)) or "New chat").split())[:120], "updated_at": _dt(last), "messages": n}
+            for sid, first, last, n in groups
+        ]
+
+
+@app.get("/api/kbs/{kb_id}/chats/{chat_id}")
+def get_chat(kb_id: str, chat_id: str, p: Principal = signed_in) -> dict[str, Any]:
+    with session_scope() as s:
+        kb = _kb(s, kb_id, p)
+        rows = s.scalars(_chat_traces(s, kb.id, chat_id, p).order_by(Trace.created_at)).all()
+        if not rows:
+            _404("chat")
+        turns: list[dict[str, Any]] = []
+        for t in rows:
+            # a deep-research report is written as a second trace for the same question
+            if turns and t.route == "deep" and turns[-1]["query"] == t.query and turns[-1]["answer"]["job_id"]:
+                turns[-1]["answer"] = {**_answer_from_trace(t), "job_id": turns[-1]["answer"]["job_id"]}
+                continue
+            turns.append({"query": t.query, "answer": _with_updated(s, _answer_from_trace(t))})
+        return {"id": chat_id, "title": " ".join(rows[0].query.split())[:120], "turns": turns}
+
+
+@app.delete("/api/kbs/{kb_id}/chats/{chat_id}")
+def delete_chat(kb_id: str, chat_id: str, p: Principal = signed_in) -> dict[str, Any]:
+    with session_scope() as s:
+        kb = _kb(s, kb_id, p)
+        ids = s.scalars(_chat_traces(s, kb.id, chat_id, p).with_only_columns(Trace.id)).all()
+        if not ids:
+            _404("chat")
+        s.execute(update(Trace).where(Trace.id.in_(ids)).values(hidden=True))
+        return {"ok": True, "removed": len(ids)}
+
+
 class FeedbackIn(BaseModel):
     kind: Literal["explicit", "copy", "citation_click"] = "explicit"
     rating: int = Field(default=0, ge=-1, le=1)
@@ -586,11 +833,28 @@ class FeedbackIn(BaseModel):
 def feedback(trace_id: str, body: FeedbackIn, p: Principal = signed_in) -> dict[str, Any]:
     with session_scope() as s:
         t = _own_trace(s, trace_id, p)
-        # student corrections become golden tests only after an admin reviews them
+        # a thumbs-down triggers a re-check against the documents (once per answer);
+        # the re-check, not the click, decides whether anything changes
+        wants_recheck = body.kind == "explicit" and body.rating < 0
+        done = (t.data or {}).get("recheck")
+        if wants_recheck and done is None:
+            rate_guard.hit(f"recheck:{p.user_id or 'service'}", 20, 3600, "Too many re-checks in the last hour. Please try again later.")
         record_feedback(
-            s, t, kind=body.kind, rating=body.rating, comment=body.comment, correction=body.correction, trusted=p.is_admin
+            s,
+            t,
+            kind=body.kind,
+            rating=body.rating,
+            comment=body.comment,
+            correction=body.correction,
+            trusted=p.is_admin,
+            make_golden=not wants_recheck,
         )
-        return {"ok": True}
+        if not wants_recheck:
+            return {"ok": True}
+        if done is not None:
+            return {"ok": True, "recheck": done}
+        version, cfg = select_config(s)
+        return {"ok": True, "recheck": recheck_answer(s, t, cfg, version, correction=body.correction, trusted=p.is_admin)}
 
 
 @app.get("/api/kbs/{kb_id}/metrics", dependencies=[api])
@@ -795,6 +1059,7 @@ def _golden_out(g: GoldenItem) -> dict[str, Any]:
         "expected_answer": g.expected_answer,
         "expected_doc_ids": g.expected_doc_ids,
         "origin": g.origin,
+        "note": g.note,
         "active": g.active,
         "created_at": _dt(g.created_at),
     }

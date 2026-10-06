@@ -77,6 +77,7 @@ def record_feedback(
     comment: str = "",
     correction: str = "",
     trusted: bool = True,
+    make_golden: bool = True,
 ) -> Feedback:
     if kind not in WEIGHTS:
         raise ValueError(f"unknown feedback kind {kind}")
@@ -89,7 +90,7 @@ def record_feedback(
         _apply_chunk_signal(session, _cited_chunk_ids(trace), good=0.0, bad=w)
         trace.negative_signal = True
         trace.diagnosed = False  # re-open for the Repair loop
-    if correction.strip() and rating < 0:
+    if make_golden and correction.strip() and rating < 0:
         # untrusted (student) corrections wait for admin review before they gate fixes
         session.add(
             GoldenItem(
