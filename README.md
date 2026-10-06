@@ -5,7 +5,9 @@
 RAGX is a free, open-source question-answering platform for your own documents (PDF, Word, HTML, Markdown, text). Unlike a plain chatbot over files, it:
 
 - **Shows its sources.** Every sentence links to the exact passage it came from.
-- **Checks itself.** A second, independent model verifies every claim. Unsupported claims are removed, and if the answer isn't in your documents it says so instead of guessing.
+- **Checks itself.** A second, independent model verifies every claim. Unsupported claims are removed. A 👎 makes it re-read the documents and re-check both its answer and your correction, so a wrong complaint can't make it say something false.
+- **Goes beyond your files, honestly.** When your files don't cover a question, it can still answer from general knowledge, clearly marked *not from your files*. You can switch this off per workspace.
+- **Works like a chat app.** Make a workspace per subject (Math, Physics…), attach PDFs right in the chat, and come back to past chats later.
 - **Heals while answering.** When the first search misses, it rewrites the query, looks further, and tries exact matches before giving up.
 - **Repairs itself over time.** In the background it works out *why* a question failed and proposes a fix. It tests the fix before applying it, and rolls it back if things get worse. Every fixed failure becomes a permanent regression test.
 - **Runs on free models.** Gemini's free tier, Groq, OpenRouter's free models, or fully local open-source models with Ollama. No credit card needed.
@@ -42,7 +44,7 @@ You need [Docker Desktop](https://www.docker.com/products/docker-desktop/).
    docker compose up -d --build
    ```
 
-5. **Open http://localhost:3000**, sign up with your admin email, and go to **Knowledge**. Create a knowledge base, add the source `/docs`, then ask a question on **Ask**.
+5. **Open http://localhost:3000**, sign up with your admin email, create a workspace, attach a few PDFs with the 📎 button, and ask a question. (Admins can also add web pages and server folders under **Files → Advanced**.)
 
 No key yet? It still starts, in **offline mode**. Everything works, but answers are simple extracts.
 
